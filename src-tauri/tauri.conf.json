@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HeraVex",
+  "version": "0.8.5",
+  "identifier": "app.heravex",
+  "build": {
+    "beforeDevCommand": "npm run dev:safe",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "HeraVex",
+        "width": 1600,
+        "height": 980,
+        "maximized": true,
+        "minWidth": 1180,
+        "minHeight": 780,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost https: ; style-src 'self' 'unsafe-inline'; script-src 'self' ; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https://api.frankfurter.app https://api.steampowered.com https://store.steampowered.com https://itch.io https://media.steampowered.com https://shared.akamai.steamstatic.com https://cdn.cloudflare.steamstatic.com https://androidpublisher.googleapis.com https://oauth2.googleapis.com https://playgrouping.googleapis.com; media-src 'self' asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+name: "Build Mac & Linux"
+
+on:
+  workflow_dispatch: # GitHub panelinden tek tuşla tetiklemek için
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-22.04] # Sadece Mac ve Linux alıyoruz
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js Kurulumu
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust Kurulumu
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux Gerekli Kütüphaneler (Sadece Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Frontend Paketlerini Yükle
+        run: npm install # Eğer pnpm kullanıyorsan burayı "pnpm install" yap
+
+      - name: Tauri Build & Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v0.8.5
+          releaseName: "HeraVex v0.8.5"
+          releaseDraft: true
+          prerelease: false

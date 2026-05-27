@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test *)",
+      "Bash(npx tsc *)",
+      "Bash(cargo check *)",
+      "Bash(python3 -)",
+      "Bash(sed -n '244,300p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '469,510p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '1523,1560p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '1636,1660p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '234,244p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '278,322p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '269,295p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '729,800p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(sed -n '2077,2115p' C:/tauri_hubUltra/src/styles.css)",
+      "Bash(findstr \"framer\")",
+      "Bash(npm install *)",
+      "Bash(powershell -NoProfile -Command \"\\(Get-Content 'C:\\\\tauri_hubUltra\\\\src\\\\styles.css' | Measure-Object -Line\\).Lines\")",
+      "Bash(n)",
+      "Bash(powershell -NoProfile -Command \"Add-Content -Path 'C:\\\\tauri_hubUltra\\\\src\\\\styles.css' -Value \\\\\"`n`n/* End marker for sidebar refactor v2 */\\\\\"\")",
+      "Bash(npx vitest *)",
+      "Bash(cargo test *)",
+      "Bash(sed -i '3040,3346d' main.rs)",
+      "Read(//c/c/tauri_hubUltra/src-tauri/src/**)",
+      "Bash(grep -n \"release-timeline\\\\|^}\\\\|^    </div>$\" /c/tauri_hubUltra/src/components/library/tabs/ReleaseTab.tsx)",
+      "Bash(cd /c/tauri_hubUltra/src-tauri/src && sed -i 's/studio-financials-/heravex-financials-/g' main.rs && grep -n \"studio-financials\\\\|heravex-financials\" main.rs)",
+      "Bash(node -e \"const fs=require\\('fs'\\);const p='C:/tauri_hubUltra/src/styles.css';const s=fs.readFileSync\\(p,'utf8'\\);console.log\\(s.split\\('\\\\n'\\).length\\)\")",
+      "Bash(npx tauri *)",
+      "PowerShell(Get-ChildItem C:\\\\HereVexProgram\\\\src-tauri -Recurse -File | Where-Object { $_.FullName -notmatch 'target|node_modules' } | Select-Object FullName, Length | Format-Table -AutoSize)",
+      "Bash(cargo clean *)",
+      "Bash(npx vite *)",
+      "Bash(node scripts/sync-version.mjs)",
+      "Bash(sed -i '42,257d' /c/HereVexProgram/src/components/pages/NoteCenter.tsx)",
+      "Bash(sed -n '40,50p' /c/HereVexProgram/src/components/pages/NoteCenter.tsx)"
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="HeraVex">
+  <defs>
+    <!-- Primary brand gradient: 45° blue → violet -->
+    <linearGradient id="heravex-bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <!-- Subtle inner sheen for depth -->
+    <linearGradient id="heravex-sheen" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.18)"/>
+      <stop offset="55%" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+    <!-- White H stroke gradient — barely perceptible, keeps it crisp on dark + light -->
+    <linearGradient id="heravex-h" x1="64" y1="60" x2="192" y2="196" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e0e7ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded-square base, 60px radius (~23.4%) -->
+  <rect x="0" y="0" width="256" height="256" rx="60" ry="60" fill="url(#heravex-bg)"/>
+  <rect x="0" y="0" width="256" height="256" rx="60" ry="60" fill="url(#heravex-sheen)"/>
+
+  <!-- Geometric "H" — built from two vertical bars + an angled crossbar.
+       Angled crossbar gives the mark a sense of motion (Linear/Vercel feel)
+       without sacrificing legibility at 16px. -->
+  <g fill="url(#heravex-h)">
+    <!-- Left vertical bar -->
+    <rect x="62"  y="60"  width="28" height="136" rx="6"/>
+    <!-- Right vertical bar -->
+    <rect x="166" y="60"  width="28" height="136" rx="6"/>
+    <!-- Crossbar — slight upward slope to feel "ascending" -->
+    <path d="M 90 142 L 166 114 L 166 142 L 90 170 Z"/>
+  </g>
+
+  <!-- Single small accent dot above the right bar — gives it identity -->
+  <circle cx="180" cy="44" r="8" fill="#ffffff" opacity="0.92"/>
+</svg>

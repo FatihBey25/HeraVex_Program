@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Compact mark variant — same geometry, tuned for avatar / favicon use.
+     Identical viewBox to the full logo so swapping in is one-line. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="HeraVex">
+  <defs>
+    <linearGradient id="mark-bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="mark-sheen" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="rgba(255,255,255,0.18)"/>
+      <stop offset="55%" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="60" ry="60" fill="url(#mark-bg)"/>
+  <rect x="0" y="0" width="256" height="256" rx="60" ry="60" fill="url(#mark-sheen)"/>
+
+  <g fill="#ffffff">
+    <rect x="62"  y="60"  width="28" height="136" rx="6"/>
+    <rect x="166" y="60"  width="28" height="136" rx="6"/>
+    <path d="M 90 142 L 166 114 L 166 142 L 90 170 Z"/>
+  </g>
+</svg>
