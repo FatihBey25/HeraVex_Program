@@ -10,6 +10,16 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
-    target: ["es2020", "chrome105", "safari13"]
+    target: ["es2020", "chrome105", "safari13"],
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          recharts: ["recharts"],
+          framer:   ["framer-motion"],
+          markdown: ["react-markdown", "remark-gfm"],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 700,
   }
 });

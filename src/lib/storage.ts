@@ -1,4 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+// v0.9 M8 — route through the wrapper so the experimental
+// "Log API calls" toggle can intercept every IPC call.
+import { invoke } from "./invokeWrapper";
 import type {
   ActivityEntry,
   AppSettingsRecord,
@@ -98,8 +100,11 @@ export async function exportBackup() {
   return invoke<string>("export_backup");
 }
 
-export async function importBackup() {
-  return invoke<string>("import_backup");
+/** Restore a backup. Pass a path to restore directly from disk (used by
+ *  the BackupPage history-row "Restore" button); omit it to fall back
+ *  to the OS file picker (used by Import & Export → Restore from file). */
+export async function importBackup(path?: string) {
+  return invoke<string>("import_backup", { path });
 }
 
 export async function exportCsvReport(csvContent: string) {
@@ -158,6 +163,60 @@ export async function revealBuildFile(relative: string) {
  *  when the user clicks "Push this version with Butler". */
 export async function resolveBuildFolder(relative: string) {
   return invoke<string>("resolve_build_folder", { relative });
+}
+
+// ── v0.9 M5: Storage stats + backup history ───────────────────────────
+
+export interface StorageStats {
+  totalBytes: number;
+  fileCount: number;
+  gamesBytes: number;
+  notesBytes: number;
+  moodboardBytes: number;
+  backupsBytes: number;
+  otherBytes: number;
+}
+
+export async function computeStorageStats(): Promise<StorageStats> {
+  return invoke<StorageStats>("compute_storage_stats");
+}
+
+export interface BackupEntry {
+  path: string;
+  name: string;
+  sizeBytes: number;
+  createdAt: string;
+  isAuto: boolean;
+}
+
+export async function listBackups(): Promise<BackupEntry[]> {
+  return invoke<BackupEntry[]>("list_backups");
+}
+
+export async function deleteBackup(path: string): Promise<void> {
+  return invoke<void>("delete_backup", { path });
+}
+
+/** v0.9 M7 — Destructive workspace wipe. Frontend MUST gate this
+ *  behind a typed-confirmation prompt. The backend does no validation
+ *  of the caller's intent. */
+export async function deleteAllData(): Promise<void> {
+  return invoke<void>("delete_all_data");
+}
+
+/** Reveal the platform log directory in the OS file manager. */
+export async function openLogDirectory(): Promise<void> {
+  return invoke<void>("open_log_directory");
+}
+
+/** Thin file IO helpers — used by the v0.9 M7 export-redaction pass.
+ *  The Tauri fs plugin isn't a hard dependency yet, so we route
+ *  through a tiny Rust command that calls std::fs. */
+export async function readTextFile(path: string): Promise<string> {
+  return invoke<string>("read_text_file", { path });
+}
+export async function writeTextFile(path: string, contents: string): Promise<void> {
+  return invoke<void>("write_text_file", { path, contents });
 }
 
 /** Open an http(s):// or mailto: URL in the user's default OS handler.

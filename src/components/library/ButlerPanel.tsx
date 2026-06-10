@@ -20,7 +20,7 @@ import {
   FolderOpen, Rocket, Save, AlertTriangle, Terminal, Eraser, X,
   CheckCircle2, ExternalLink, Loader2,
 } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../../lib/invokeWrapper";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAppStore } from "../../store";
 import { pickDirectory } from "../../lib/storage";

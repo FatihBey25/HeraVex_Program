@@ -3,6 +3,8 @@ import { Trash, Receipt, PieChart as PieIcon } from "lucide-react";
 import { imgSrc } from "../lib/images";
 import { useAppStore } from "../store";
 import { PieChartWidget, calculateAccumulatedAmount } from "./PieChartWidget";
+import { ExpenseTrendChart } from "./shared/ExpenseTrendChart";
+import { formatNumber } from "../lib/formatLocale";
 import { ConfirmDialog } from "./shared/ConfirmDialog";
 import { EmptyState } from "./shared/EmptyState";
 import { isGeneralGame } from "../lib/general-game";
@@ -202,8 +204,19 @@ function ExpenseDistribution({ expenses, rate, emptyLabel, distLabel }: Distribu
 export function Wallet() {
   const {
     games, globalExpenses, exchangeRates, activeCurrencies,
-    setActiveCurrencies, handleAddExpense, handleDeleteExpense, ui, language,
+    setActiveCurrencies, handleAddExpense, handleDeleteExpense, ui, language, general,
   } = useAppStore();
+  // Currency formatting now honours the user's "$ before" / "amount after"
+  // preference from Settings → General. Falls back to the legacy "$N" form
+  // when nothing is set so old screenshots still match.
+  const fmtUsd = (n: number) =>
+    general.currencyPosition === "after"
+      ? `${formatNumber(n, general.numberFormat ?? "comma")} USD`
+      : `$ ${formatNumber(n, general.numberFormat ?? "comma")}`;
+  const fmtCur = (n: number, c: string) =>
+    general.currencyPosition === "before"
+      ? `${c} ${formatNumber(n, general.numberFormat ?? "comma")}`
+      : `${formatNumber(n, general.numberFormat ?? "comma")} ${c}`;
 
   const [walletTab, setWalletTab] = useState<"general" | "projects">("general");
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -318,11 +331,19 @@ export function Wallet() {
           <p className="eyebrow">STUDIO DASHBOARD</p>
           <h1 style={{ margin: 0, fontSize: "2rem" }}>{ui.financialSummary}</h1>
           <h2 style={{ marginTop: "1rem", fontSize: "2.5rem", fontWeight: 800, color: "var(--primary)" }}>
-            $ {totalAll.toFixed(2)}
+            {fmtUsd(totalAll)}
           </h2>
           <span className="eyebrow">{ui.wTotalAllPlain}</span>
         </div>
       </section>
+
+      {/* Monthly trend — rolling 12-month aggregate of global + project
+          expenses. Caption above shows delta vs the prior month. */}
+      <ExpenseTrendChart
+        games={games}
+        globalExpenses={globalExpenses}
+        exchangeRates={exchangeRates}
+      />
 
       {/* Tabs */}
       <div className="wallet-tabs">
@@ -341,7 +362,7 @@ export function Wallet() {
                 <p className="wallet-sub-copy">{ui.wGeneralStudioSub}</p>
               </div>
               <div className="wallet-accordion-total">
-                $ {globalExpenses.reduce((s, e) => s + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")), 0).toFixed(2)}
+                {fmtUsd(globalExpenses.reduce((s, e) => s + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")), 0))}
               </div>
             </div>
             <div className={`wallet-accordion ${expandedId === "__general__" ? "wallet-accordion-open" : ""}`} style={{ borderTop: expandedId === "__general__" ? "1px solid #ffffff20" : "none" }}>

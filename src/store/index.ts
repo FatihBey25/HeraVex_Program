@@ -1,8 +1,42 @@
 import { create } from "zustand";
+import { devWarn } from "../lib/devLog";
 import * as storage from "../lib/storage";
 import { copy, defaultReleaseTemplate, compareTasks, type AppLanguage, type DetailTab } from "../lib/i18n";
 import type { ExpenseItem, GameRecord, MoodboardCategory, MoodboardItem, NoteRecord, ReleaseTemplateItem, TaskItem } from "../types";
 import { defaultMoodboardCategoriesForLanguage } from "../lib/moodboardDefaults";
+import {
+  DEFAULT_APPEARANCE, DEFAULT_LAYOUT, DEFAULT_TYPOGRAPHY,
+  loadAppearance, loadLayout, loadTypography,
+  saveAppearance, saveLayout, saveTypography,
+  type AppearanceSlice, type LayoutSlice, type TypographySlice,
+} from "../lib/appearance";
+import {
+  DEFAULT_GENERAL, DEFAULT_PROFILE,
+  loadGeneral, loadProfile, saveGeneral, saveProfile,
+  type GeneralSlice, type ProfileSlice,
+} from "../lib/userProfile";
+import {
+  DEFAULT_NOTIFICATIONS, DEFAULT_POMODORO_PREFS, DEFAULT_STARTUP,
+  loadNotifications, loadPomodoroPrefs, loadStartup,
+  saveNotifications, savePomodoroPrefs, saveStartup,
+  type NotificationsSlice, type PomodoroPrefsSlice, type StartupSlice,
+} from "../lib/preferences";
+import {
+  DEFAULT_BACKUP_PREFS, DEFAULT_STUDIO_IDENTITY,
+  loadBackupPrefs, loadStudioIdentity,
+  saveBackupPrefs, saveStudioIdentity,
+  type BackupPrefsSlice, type StudioIdentitySlice,
+} from "../lib/studioIdentity";
+import {
+  DEFAULT_TEAM_MODE, DEFAULT_WEBHOOKS,
+  loadTeamMode, loadWebhooks, saveTeamMode, saveWebhooks,
+  type TeamModeSlice, type WebhooksSlice,
+} from "../lib/teamWebhooks";
+import {
+  DEFAULT_EXPERIMENTAL, DEFAULT_PRIVACY,
+  loadExperimental, loadPrivacy, saveExperimental, savePrivacy,
+  type ExperimentalSlice, type PrivacySlice,
+} from "../lib/privacyExperimental";
 import { notify } from "../lib/notify";
 import { translateError } from "../lib/errorTranslate";
 import { timerPause, timerStart } from "../lib/taskTimer";
@@ -170,7 +204,7 @@ async function applyMoodboardNoteLink(
     await storage.saveNote(newNote);
     notifyNotesUpdated();
   } catch (err) {
-    console.warn(`[applyMoodboardNoteLink] note save failed:`, err);
+    devWarn(`[applyMoodboardNoteLink] note save failed:`, err);
     // Continue — moodboard side still saved below.
   }
 
@@ -283,6 +317,11 @@ interface AppStore {
    *  it. NoteCenter calls this instead of `storage.deleteNote` so the
    *  cascade can never be skipped. */
   removeNote: (noteId: string) => Promise<void>;
+  /** Persist a new global order for studio notes. Receives the ids in
+   *  the desired display order; assigns `order = idx` to each and
+   *  saves them one by one. The frontend then refetches via the
+   *  `heravex:notes-updated` event so other panes pick up the change. */
+  reorderNotes: (orderedIds: string[]) => Promise<void>;
 
   // ── release template ──────────────────────────────────────────────────────
   handleSaveReleaseTemplate: (template: ReleaseTemplateItem[]) => Promise<void>;
@@ -294,7 +333,61 @@ interface AppStore {
   // ── settings / backup ─────────────────────────────────────────────────────
   handleSaveExchangeRates: (rates: Record<string, number>) => Promise<void>;
   handleExportBackup: () => Promise<void>;
-  handleImportBackup: () => Promise<void>;
+  handleImportBackup: (path?: string) => Promise<void>;
+
+  // ── v0.9 M2: appearance / typography / layout (live preview) ──────────────
+  appearance: AppearanceSlice;
+  typography: TypographySlice;
+  layout: LayoutSlice;
+  // ── v0.9 M3: profile + general locale (localStorage-backed) ───────────────
+  profile: ProfileSlice;
+  general: GeneralSlice;
+  setProfile: (patch: Partial<ProfileSlice>) => void;
+  setGeneral: (patch: Partial<GeneralSlice>) => void;
+  resetProfile: () => void;
+  resetGeneral: () => void;
+  // ── v0.9 M4: notifications / startup / pomodoro prefs ─────────────────────
+  notifications: NotificationsSlice;
+  startup: StartupSlice;
+  pomodoroPrefs: PomodoroPrefsSlice;
+  setNotifications: (patch: Partial<NotificationsSlice>) => void;
+  setStartup: (patch: Partial<StartupSlice>) => void;
+  setPomodoroPrefs: (patch: Partial<PomodoroPrefsSlice>) => void;
+  resetNotifications: () => void;
+  resetStartup: () => void;
+  resetPomodoroPrefs: () => void;
+  // ── v0.9 M5: studio identity + backup prefs ──────────────────────────────
+  studioIdentity: StudioIdentitySlice;
+  backupPrefs: BackupPrefsSlice;
+  setStudioIdentity: (patch: Partial<StudioIdentitySlice>) => void;
+  setBackupPrefs: (patch: Partial<BackupPrefsSlice>) => void;
+  resetStudioIdentity: () => void;
+  resetBackupPrefs: () => void;
+  // ── v0.9 M6: team mode + webhooks ────────────────────────────────────────
+  teamMode: TeamModeSlice;
+  webhooks: WebhooksSlice;
+  setTeamMode: (patch: Partial<TeamModeSlice>) => void;
+  setWebhooks: (patch: Partial<WebhooksSlice>) => void;
+  resetTeamMode: () => void;
+  resetWebhooks: () => void;
+  // ── v0.9 M7: privacy + experimental ─────────────────────────────────────
+  privacy: PrivacySlice;
+  experimental: ExperimentalSlice;
+  setPrivacy: (patch: Partial<PrivacySlice>) => void;
+  setExperimental: (patch: Partial<ExperimentalSlice>) => void;
+  resetPrivacy: () => void;
+  resetExperimental: () => void;
+  /** Patch a subset of the appearance slice and persist immediately.
+   *  All three setters debounce on react-render rather than a timer,
+   *  so the CSS-var apply effect runs once per commit. */
+  setAppearance: (patch: Partial<AppearanceSlice>) => void;
+  setTypography: (patch: Partial<TypographySlice>) => void;
+  setLayout: (patch: Partial<LayoutSlice>) => void;
+  /** Reset a specific page's slice back to defaults — wired to the
+   *  shell's "Reset this page" header button. */
+  resetAppearance: () => void;
+  resetTypography: () => void;
+  resetLayout: () => void;
 
   // ── store integrations ────────────────────────────────────────────────────
   handleSaveApiKeys: (keys: {
@@ -326,6 +419,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   })(),
 
+  // v0.9 M2 — appearance/typography/layout slices for live preview.
+  // Loaded from localStorage on boot; the App-level effect mirrors
+  // them to CSS custom properties on `documentElement` so every
+  // visible knob applies without a remount.
+  appearance: loadAppearance(),
+  typography: loadTypography(),
+  layout:     loadLayout(),
+  profile:    loadProfile(),
+  general:    loadGeneral(),
+  notifications: loadNotifications(),
+  startup:       loadStartup(),
+  pomodoroPrefs: loadPomodoroPrefs(),
+  studioIdentity: loadStudioIdentity(),
+  backupPrefs:   loadBackupPrefs(),
+  teamMode:      loadTeamMode(),
+  webhooks:      loadWebhooks(),
+  privacy:       loadPrivacy(),
+  experimental:  loadExperimental(),
+
   language: "en",
   showLanguagePrompt: false,
   workspaceTab: "dashboard",
@@ -356,6 +468,139 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       localStorage.setItem("studiohub_active_currencies", JSON.stringify(currencies));
     } catch {}
+  },
+
+  // ── appearance / typography / layout ──────────────────────────────────────
+  setAppearance: (patch) => {
+    const next = { ...get().appearance, ...patch };
+    set({ appearance: next });
+    saveAppearance(next);
+  },
+  setTypography: (patch) => {
+    const next = { ...get().typography, ...patch };
+    set({ typography: next });
+    saveTypography(next);
+  },
+  setLayout: (patch) => {
+    const next = { ...get().layout, ...patch };
+    set({ layout: next });
+    saveLayout(next);
+  },
+  resetAppearance: () => {
+    set({ appearance: DEFAULT_APPEARANCE });
+    saveAppearance(DEFAULT_APPEARANCE);
+  },
+  resetTypography: () => {
+    set({ typography: DEFAULT_TYPOGRAPHY });
+    saveTypography(DEFAULT_TYPOGRAPHY);
+  },
+  resetLayout: () => {
+    set({ layout: DEFAULT_LAYOUT });
+    saveLayout(DEFAULT_LAYOUT);
+  },
+
+  setProfile: (patch) => {
+    const next = { ...get().profile, ...patch };
+    set({ profile: next });
+    saveProfile(next);
+  },
+  setGeneral: (patch) => {
+    const next = { ...get().general, ...patch };
+    set({ general: next });
+    saveGeneral(next);
+  },
+  resetProfile: () => {
+    set({ profile: DEFAULT_PROFILE });
+    saveProfile(DEFAULT_PROFILE);
+  },
+  resetGeneral: () => {
+    set({ general: DEFAULT_GENERAL });
+    saveGeneral(DEFAULT_GENERAL);
+  },
+
+  setNotifications: (patch) => {
+    const next = { ...get().notifications, ...patch };
+    set({ notifications: next });
+    saveNotifications(next);
+  },
+  setStartup: (patch) => {
+    const next = { ...get().startup, ...patch };
+    set({ startup: next });
+    saveStartup(next);
+  },
+  setPomodoroPrefs: (patch) => {
+    const next = { ...get().pomodoroPrefs, ...patch };
+    set({ pomodoroPrefs: next });
+    savePomodoroPrefs(next);
+  },
+  resetNotifications: () => {
+    set({ notifications: DEFAULT_NOTIFICATIONS });
+    saveNotifications(DEFAULT_NOTIFICATIONS);
+  },
+  resetStartup: () => {
+    set({ startup: DEFAULT_STARTUP });
+    saveStartup(DEFAULT_STARTUP);
+  },
+  resetPomodoroPrefs: () => {
+    set({ pomodoroPrefs: DEFAULT_POMODORO_PREFS });
+    savePomodoroPrefs(DEFAULT_POMODORO_PREFS);
+  },
+
+  setStudioIdentity: (patch) => {
+    const next = { ...get().studioIdentity, ...patch };
+    set({ studioIdentity: next });
+    saveStudioIdentity(next);
+  },
+  setBackupPrefs: (patch) => {
+    const next = { ...get().backupPrefs, ...patch };
+    set({ backupPrefs: next });
+    saveBackupPrefs(next);
+  },
+  resetStudioIdentity: () => {
+    set({ studioIdentity: DEFAULT_STUDIO_IDENTITY });
+    saveStudioIdentity(DEFAULT_STUDIO_IDENTITY);
+  },
+  resetBackupPrefs: () => {
+    set({ backupPrefs: DEFAULT_BACKUP_PREFS });
+    saveBackupPrefs(DEFAULT_BACKUP_PREFS);
+  },
+
+  setTeamMode: (patch) => {
+    const next = { ...get().teamMode, ...patch };
+    set({ teamMode: next });
+    saveTeamMode(next);
+  },
+  setWebhooks: (patch) => {
+    const next = { ...get().webhooks, ...patch };
+    set({ webhooks: next });
+    saveWebhooks(next);
+  },
+  resetTeamMode: () => {
+    set({ teamMode: DEFAULT_TEAM_MODE });
+    saveTeamMode(DEFAULT_TEAM_MODE);
+  },
+  resetWebhooks: () => {
+    set({ webhooks: DEFAULT_WEBHOOKS });
+    saveWebhooks(DEFAULT_WEBHOOKS);
+  },
+
+  setPrivacy: (patch) => {
+    const next = { ...get().privacy, ...patch };
+    set({ privacy: next });
+    savePrivacy(next);
+  },
+  setExperimental: (patch) => {
+    const next = { ...get().experimental, ...patch };
+    set({ experimental: next });
+    saveExperimental(next);
+  },
+  resetPrivacy: () => {
+    set({ privacy: DEFAULT_PRIVACY });
+    savePrivacy(DEFAULT_PRIVACY);
+  },
+  resetExperimental: () => {
+    set({ experimental: DEFAULT_EXPERIMENTAL });
+    saveExperimental(DEFAULT_EXPERIMENTAL);
   },
 
   // ── toasts ─────────────────────────────────────────────────────────────────
@@ -702,7 +947,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     // sync. This is a development guard; in production it's a no-op
     // because the UI never tries this path.
     if ("linkedTaskIds" in patch || "linkedNoteIds" in patch) {
-      console.warn("[updateMoodboardItem] linked*Ids must be mutated via link helpers; ignored");
+      devWarn("[updateMoodboardItem] linked*Ids must be mutated via link helpers; ignored");
       delete (patch as Partial<MoodboardItem>).linkedTaskIds;
       delete (patch as Partial<MoodboardItem>).linkedNoteIds;
     }
@@ -745,7 +990,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         };
         await storage.saveNote(patched);
       } catch (err) {
-        console.warn(`[deleteMoodboardItem] note cleanup failed for ${noteId}:`, err);
+        devWarn(`[deleteMoodboardItem] note cleanup failed for ${noteId}:`, err);
         // Don't abort — the moodboard side still needs to be cleaned.
       }
     }
@@ -888,6 +1133,31 @@ export const useAppStore = create<AppStore>((set, get) => ({
     notifyNotesUpdated();
   },
 
+  reorderNotes: async (orderedIds) => {
+    // Load fresh notes so we don't overwrite content edits that
+    // happened in NoteCenter between renders. Then rewrite each one
+    // with its new `order` slot. Notes are atomic per-file, so even
+    // if a save in the middle fails the prefix landed correctly and
+    // the user can retry — no half-state on the relation side.
+    if (orderedIds.length === 0) return;
+    const fresh = await storage.getAllNotes().catch(() => null);
+    if (!fresh) return;
+    const byId = new Map(fresh.map((n) => [n.id, n]));
+    for (let idx = 0; idx < orderedIds.length; idx++) {
+      const note = byId.get(orderedIds[idx]);
+      if (!note) continue;
+      // Skip the write when the order already matches — saves disk
+      // churn on a drag that didn't actually move anything.
+      if ((note.order ?? 0) === idx) continue;
+      try {
+        await storage.saveNote({ ...note, order: idx });
+      } catch (err) {
+        devWarn(`[reorderNotes] save failed for ${note.id}:`, err);
+      }
+    }
+    notifyNotesUpdated();
+  },
+
   // ── release template ──────────────────────────────────────────────────────
 
   handleSaveReleaseTemplate: async (template) => {
@@ -945,13 +1215,54 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   handleExportBackup: async () => {
-    const { showToast, ui } = get();
+    const { showToast, ui, privacy, language } = get();
+    const busyId = `backup-${Date.now()}`;
+    const busyLabel = language === "tr" ? "Yedek alınıyor…" : "Saving backup…";
+    window.dispatchEvent(new CustomEvent("heravex:busy", { detail: { id: busyId, label: busyLabel } }));
     try {
-      const path = await storage.exportBackup();
+      // Default behaviour is now silent → <AppData>/heravex/Saves/.
+      // The Rust side runs on a blocking thread so this await doesn't
+      // freeze the UI even on multi-MB workspaces.
+      const { invoke } = await import("../lib/invokeWrapper");
+      const path = await invoke<string>("export_backup_silent", { prefix: "manual" });
+      // v0.9 M7 — redaction gate. When the user toggles "Redact API
+      // keys on export" we read the freshly written JSON back, strip
+      // the secret fields, and rewrite it before the toast fires.
+      // Only JSON files are redactable (ZIP archives need Rust-side
+      // work; we leave those alone). The path returned by Rust is
+      // already a write-confirmed full path on disk.
+      if (privacy.redactKeysOnExport && path.toLowerCase().endsWith(".json")) {
+        try {
+          const raw = await storage.readTextFile(path);
+          const obj = JSON.parse(raw) as Record<string, unknown>;
+          // Redact at every known location. The shape is stable so a
+          // simple key-by-key blank-out is safer than recursing.
+          const REDACT_KEYS = ["steamApiKey", "itchApiKey", "steamUserId", "googlePlayJsonPath"];
+          for (const k of REDACT_KEYS) {
+            if (k in obj) (obj as Record<string, string>)[k] = "***REDACTED***";
+          }
+          if (obj.settings && typeof obj.settings === "object") {
+            const s = obj.settings as Record<string, unknown>;
+            for (const k of REDACT_KEYS) {
+              if (k in s) (s as Record<string, string>)[k] = "***REDACTED***";
+            }
+          }
+          await storage.writeTextFile(path, JSON.stringify(obj, null, 2));
+        } catch (err) {
+          // Silently skip redaction on parse/IO failure — the export
+          // itself was successful and that's the higher-priority signal.
+          devWarn("[redactKeysOnExport] skipped:", err);
+        }
+      }
       showToast(ui.backupExported(path));
-      void notify("HeraVex", ui.backupExported(path));
+      // Notification kept lightweight — full path can be very long on
+      // Windows AppData; let the toast carry the detail and keep the
+      // OS notification short.
+      void notify("HeraVex", language === "tr" ? "Yedek alındı." : "Backup saved.");
     } catch (err) {
       showToast(translateError(err, get().language), "error");
+    } finally {
+      window.dispatchEvent(new CustomEvent("heravex:busy", { detail: { id: busyId, done: true } }));
     }
   },
 
@@ -1007,10 +1318,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  handleImportBackup: async () => {
-    const { showToast, ui, refreshGames } = get();
+  handleImportBackup: async (path?: string) => {
+    const { showToast, ui, refreshGames, language } = get();
+    const busyId = `restore-${Date.now()}`;
+    const busyLabel = language === "tr" ? "Yedek geri yükleniyor…" : "Restoring backup…";
+    window.dispatchEvent(new CustomEvent("heravex:busy", { detail: { id: busyId, label: busyLabel } }));
     try {
-      const path = await storage.importBackup();
+      const resolved = await storage.importBackup(path);
       set({ selectedId: "", activeTaskId: "" });
       await refreshGames();
       const settings = await storage.loadAppSettings().catch(() => null);
@@ -1024,9 +1338,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
         globalExpenses: settings?.globalExpenses ?? [],
         releaseTemplate: settings?.releaseTemplate ?? defaultReleaseTemplate(),
       });
-      showToast(ui.backupImported(path));
+      showToast(ui.backupImported(resolved));
     } catch (err) {
       showToast(translateError(err, get().language), "error");
+    } finally {
+      window.dispatchEvent(new CustomEvent("heravex:busy", { detail: { id: busyId, done: true } }));
     }
   },
 }));

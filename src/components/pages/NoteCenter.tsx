@@ -9,6 +9,7 @@ import {
 } from "../../lib/storage";
 import { MarkdownWorkspace, type SaveStatus, type MarkdownTemplate } from "../shared/MarkdownWorkspace";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { useListKeyNav } from "../../lib/useListKeyNav";
 import { isGeneralGame } from "../../lib/general-game";
 import { MoodboardThumbStrip } from "../library/MoodboardThumbStrip";
 import { getGameTemplates, getGlobalTemplates } from "../../lib/noteTemplates";
@@ -44,7 +45,7 @@ const activeKey = (sel: ActiveSelection): string =>
 // ── Component ──────────────────────────────────────────────────────────────
 
 export function NoteCenter() {
-  const { games: allGames, language, ui, showToast, showError, handleSaveGame, removeNote } = useAppStore();
+  const { games: allGames, language, ui, showToast, showError, handleSaveGame, removeNote, reorderNotes } = useAppStore();
   // Internal marker game (general tasks container) isn't a project — keep it
   // out of the Notes browser's PROJECTS list.
   const games = useMemo(() => allGames.filter((g) => !isGeneralGame(g)), [allGames]);
@@ -60,6 +61,112 @@ export function NoteCenter() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // v0.9 — drag-to-reorder state for the studio notes list. Mirrors
+  // the Kanban column-drag pattern: we only track which item the
+  // cursor is currently hovering as the next "drop target", then on
+  // mouseup splice the dragged id into that slot. No HTML5 drag API
+  // (it conflicts with the existing rename-on-double-click handler).
+  const [draggingNoteId, setDraggingNoteId] = useState<string>("");
+  const [dropTargetNoteId, setDropTargetNoteId] = useState<string>("");
+  const draggingNoteIdRef = useRef<string>("");
+  const dropTargetNoteIdRef = useRef<string>("");
+
+  // Sorted, drag-aware view of the notes list. Notes are sorted by
+  // their persisted `order` ascending, with `updatedAt desc` as the
+  // tie-breaker so pre-v0.9 records (all `order=0`) still render
+  // most-recent first until the user reorders them.
+  const sortedNotes = useMemo(() => {
+    return [...notes].sort((a, b) => {
+      const ao = a.order ?? 0;
+      const bo = b.order ?? 0;
+      if (ao !== bo) return ao - bo;
+      return b.updatedAt.localeCompare(a.updatedAt);
+    });
+  }, [notes]);
+  const sortedNotesRef = useRef(sortedNotes);
+  sortedNotesRef.current = sortedNotes;
+
+  /** Lookup the note id of whatever sidebar row sits under `(x, y)`,
+   *  using a `data-note-id` attribute we render on each `<li>`. Same
+   *  trick the Kanban board uses for column drops. */
+  const noteIdFromPoint = useCallback((x: number, y: number): string => {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    const row = el?.closest("[data-note-id]") as HTMLElement | null;
+    return row?.dataset.noteId ?? "";
+  }, []);
+
+  const onNoteRowMouseDown = useCallback(
+    (noteId: string) => (e: React.MouseEvent) => {
+      // Left click only. Skip when the click landed on an actionable
+      // child (rename input, delete button) so existing UX paths
+      // still work.
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      if (target.closest("input, button, a")) return;
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      let dragStarted = false;
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!dragStarted) {
+          // 6px threshold lets plain clicks select-without-drag.
+          if (Math.hypot(dx, dy) < 6) return;
+          dragStarted = true;
+          draggingNoteIdRef.current = noteId;
+          setDraggingNoteId(noteId);
+          document.body.style.cursor = "grabbing";
+        }
+        const target = noteIdFromPoint(ev.clientX, ev.clientY);
+        const next = target && target !== noteId ? target : "";
+        if (next !== dropTargetNoteIdRef.current) {
+          dropTargetNoteIdRef.current = next;
+          setDropTargetNoteId(next);
+        }
+      };
+
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        const moved = draggingNoteIdRef.current;
+        const target = dropTargetNoteIdRef.current;
+        draggingNoteIdRef.current = "";
+        dropTargetNoteIdRef.current = "";
+        setDraggingNoteId("");
+        setDropTargetNoteId("");
+        if (!dragStarted || !moved || !target) return;
+
+        // Recompute the order: pull `moved` out, insert before `target`.
+        const ids = sortedNotesRef.current.map((n) => n.id);
+        const fromIdx = ids.indexOf(moved);
+        const toIdx = ids.indexOf(target);
+        if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return;
+        ids.splice(fromIdx, 1);
+        // After removal, the original `toIdx` may have shifted if the
+        // moved item was above it — recompute on the fresh list.
+        const newToIdx = ids.indexOf(target);
+        ids.splice(newToIdx, 0, moved);
+
+        // Optimistic local sort by writing matching `order` values
+        // to the in-memory state; the store persists asynchronously.
+        setNotes((prev) =>
+          prev.map((n) => {
+            const idx = ids.indexOf(n.id);
+            return idx >= 0 ? { ...n, order: idx } : n;
+          }),
+        );
+        void reorderNotes(ids);
+      };
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [noteIdFromPoint, reorderNotes],
+  );
 
   // ── Resizable sidebar ────────────────────────────────────────────────
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -141,6 +248,20 @@ export function NoteCenter() {
     window.addEventListener("heravex:notes-updated", handler);
     return () => window.removeEventListener("heravex:notes-updated", handler);
   }, []);
+
+  // ── Vim-style j/k navigation on the global notes list ───────────────
+  // Operates on the flat ordered ids; press Enter (or 'o') to focus
+  // the editor view, 'x' / Delete to prompt the existing remove flow.
+  // The hook ignores inputs so typing in the title bar / markdown
+  // editor is unaffected.
+  const noteIds = useMemo(() => notes.map((n) => n.id), [notes]);
+  const currentNoteId = selection?.kind === "global" ? selection.noteId : null;
+  useListKeyNav({
+    ids: noteIds,
+    currentId: currentNoteId,
+    setCurrentId: (id) => setSelection({ kind: "global", noteId: id }),
+    onDelete: (id) => setConfirmDeleteId(id),
+  });
 
   // ── Resolved active item ─────────────────────────────────────────────
   const activeNote = useMemo<NoteRecord | null>(() => {
@@ -376,18 +497,27 @@ export function NoteCenter() {
               ) : (
                 <ul className="note-browser-list">
                   <AnimatePresence initial={false}>
-                    {notes.map((n) => {
+                    {sortedNotes.map((n) => {
                       const isActive =
                         selection?.kind === "global" && selection.noteId === n.id;
+                      const isDragging = draggingNoteId === n.id;
+                      const isDropTarget = dropTargetNoteId === n.id;
                       return (
                         <motion.li
                           key={n.id}
-                          layout
+                          data-note-id={n.id}
+                          layout={!isDragging}
                           initial={{ opacity: 0, x: -6 }}
                           animate={{ opacity: 1, x: 0 }}
                           exit={{ opacity: 0, x: -8 }}
                           transition={{ type: "tween", duration: 0.18, ease: "easeOut" }}
-                          className={`note-browser-item ${isActive ? "is-active" : ""}`}
+                          className={[
+                            "note-browser-item",
+                            isActive ? "is-active" : "",
+                            isDragging ? "is-dragging" : "",
+                            isDropTarget ? "is-drop-target" : "",
+                          ].filter(Boolean).join(" ")}
+                          onMouseDown={onNoteRowMouseDown(n.id)}
                         >
                           <FileText size={12} className="note-browser-icon" />
                           {renamingId === n.id ? (

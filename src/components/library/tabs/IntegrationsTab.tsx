@@ -1,5 +1,5 @@
 import { useAppStore } from "../../../store";
-import { openStorePage } from "../../../lib/storage";
+import { openStorePage, openExternal } from "../../../lib/storage";
 import { Plus, Trash2, ExternalLink } from "lucide-react";
 import type { CustomLink, GameRecord } from "../../../types";
 
@@ -35,8 +35,23 @@ export function IntegrationsTab({ gameId }: { gameId: string }) {
   };
 
   const openCustom = (url: string) => {
-    if (!url.trim()) return;
-    void window.open(url, "_blank", "noopener,noreferrer");
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    // v0.9 fix — Tauri's webview blocks `window.open` for external
+    // schemes, so the old call silently no-op'd. Route through the
+    // Rust `open_external` command (already wired for the "Send
+    // feedback" + releases buttons) which validates the URL and hands
+    // it to the OS default handler.
+    //
+    // Users typed `gog.com/...` without a scheme often enough that
+    // we just prepend `https://` rather than reject the click.
+    const hasScheme = /^(https?:|mailto:)/i.test(trimmed);
+    const finalUrl = hasScheme ? trimmed : `https://${trimmed}`;
+    void openExternal(finalUrl).catch((err) => {
+      // Surface real errors (e.g. URL parse failure on the Rust side)
+      // instead of silently dropping the click as the old version did.
+      console.warn("[custom link] open failed:", err);
+    });
   };
 
   return (

@@ -32,7 +32,13 @@
       "Bash(npx vite *)",
       "Bash(node scripts/sync-version.mjs)",
       "Bash(sed -i '42,257d' /c/HereVexProgram/src/components/pages/NoteCenter.tsx)",
-      "Bash(sed -n '40,50p' /c/HereVexProgram/src/components/pages/NoteCenter.tsx)"
+      "Bash(sed -n '40,50p' /c/HereVexProgram/src/components/pages/NoteCenter.tsx)",
+      "Bash(grep -v \"__tests__\\\\|node_modules\\\\|dist/\\\\|//\\\\|\\\\.css\\\\|\\\\.json\")",
+      "Bash(npm run *)",
+      "Bash(grep -n \"^\\\\.bg-main-pureBlack .toast {$\" src/styles.css)",
+      "Bash(awk 'NR>=99 && NR<=285 { open+=gsub\\(/<div/,\"&\"\\); close+=gsub\\(/<\\\\/div>/,\"&\"\\); selfclose+=gsub\\(/<div[^>]*\\\\/>/,\"&\"\\) }; END { print \"open:\", open, \"close:\", close, \"self:\", selfclose }' src/components/modals/ProfileViewModal.tsx)",
+      "Bash(grep -rln \"formatCurrency\\\\|toFixed.*USD\\\\|\\\\\\\\\\\\$ \" src/components/ src/lib/)",
+      "Bash(grep -n \"formatCurrency\\\\|\\\\\\\\\\\\$ \\\\|toFixed.*\\\\\\\\\\\\$\\\\|currency\" src/components/Wallet.tsx)"
     ]
   }
 }

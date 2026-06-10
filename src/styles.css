@@ -4,12 +4,464 @@
 
 :root {
   color-scheme: dark;
-  font-family: "Segoe UI", sans-serif;
+  font-family: var(--font-app, "Segoe UI", sans-serif);
+  font-size: var(--font-size-base, 14px);
+  line-height: var(--line-height, 1.55);
+  letter-spacing: var(--letter-spacing, 0);
   background:
     radial-gradient(circle at top left, rgba(90, 150, 255, 0.18), transparent 24%),
     radial-gradient(circle at bottom right, rgba(57, 186, 134, 0.14), transparent 22%),
     #091018;
   color: #f4f7fb;
+
+  /* v0.9 M2 — live-preview tokens. Every var here has a JS-set
+   * counterpart in `applyAppearanceToDom`. Defaults below match the
+   * factory defaults so the app renders correctly even if the effect
+   * never runs (SSR / first paint). */
+  --accent: #a78bfa;
+  --accent-soft:   #a78bfa2e;
+  --accent-softer: #a78bfa1a;
+  --accent-faint:  #a78bfa0a;
+  --accent-strong: #a78bfa8c;
+  --status-success: #34d399;
+  --status-warning: #f59e0b;
+  --status-danger:  #f87171;
+  --status-info:    #4f8cff;
+  --density-scale: 1;
+  --sidebar-width: 300px;
+  --anim-duration: 0.18s;
+  --radius-md: 10px;
+  --border-weight: 1px;
+  --heading-scale: 1;
+  --bold-weight: 600;
+}
+
+/* Background style overrides (live preview) */
+:root.bg-main-pureBlack {
+  /* "Pure black" preset — softened to a near-black so OLED bloom and
+     thin borders still read. Was #000, now a very dark neutral. */
+  background: #060709;
+}
+:root.bg-main-gradient {
+  background:
+    radial-gradient(circle at top left, rgba(167, 139, 250, 0.28), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(57, 186, 134, 0.22), transparent 26%),
+    #050810;
+}
+:root.bg-main-midnight {
+  background:
+    radial-gradient(circle at top right, rgba(79, 140, 255, 0.22), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(99, 102, 241, 0.18), transparent 28%),
+    #07091a;
+}
+:root.bg-main-ocean {
+  background:
+    radial-gradient(circle at top left, rgba(34, 211, 238, 0.18), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.20), transparent 26%),
+    #061522;
+}
+:root.bg-main-plum {
+  background:
+    radial-gradient(circle at top right, rgba(167, 139, 250, 0.24), transparent 28%),
+    radial-gradient(circle at bottom left, rgba(236, 72, 153, 0.16), transparent 26%),
+    #110a1a;
+}
+:root.bg-main-forest {
+  background:
+    radial-gradient(circle at top left, rgba(52, 211, 153, 0.18), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(16, 185, 129, 0.14), transparent 26%),
+    #07140f;
+}
+:root.bg-main-slate {
+  background:
+    radial-gradient(circle at top, rgba(148, 163, 184, 0.10), transparent 28%),
+    #0d131c;
+}
+:root.bg-main-sunset {
+  background:
+    radial-gradient(circle at top left, rgba(251, 146, 60, 0.20), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(244, 63, 94, 0.18), transparent 26%),
+    #160b10;
+}
+
+/* ── Theme-aware surface tokens ──────────────────────────────────────
+ * Every theme below sets four tokens that drive ALL panel/card/modal
+ * surfaces. The override block further down maps these tokens onto
+ * the most-visible surfaces so menus adopt the active theme rather
+ * than staying the old slate-blue. Themes that don't set tokens
+ * inherit the legacy palette (standard / gradient / pureBlack). */
+:root.bg-main-midnight {
+  /* Cooler, deeper tone — the previous 0.55 alpha let the radial orbs
+     leak through and made the cards look muddy. 0.78 sits squarely
+     between the bg and the bright text without going slate-grey. */
+  --theme-surface:      rgba(16, 22, 42, 0.78);
+  --theme-surface-alt:  rgba(24, 32, 58, 0.85);
+  --theme-border:       rgba(140, 160, 220, 0.18);
+  --theme-input:        rgba(10, 14, 30, 0.82);
+}
+:root.bg-main-ocean {
+  --theme-surface:      rgba(10, 38, 58, 0.55);
+  --theme-surface-alt:  rgba(14, 50, 72, 0.70);
+  --theme-border:       rgba(80, 180, 220, 0.16);
+  --theme-input:        rgba(6, 24, 38, 0.70);
+}
+:root.bg-main-plum {
+  --theme-surface:      rgba(46, 24, 60, 0.55);
+  --theme-surface-alt:  rgba(60, 32, 80, 0.70);
+  --theme-border:       rgba(190, 140, 220, 0.16);
+  --theme-input:        rgba(30, 16, 42, 0.70);
+}
+:root.bg-main-forest {
+  --theme-surface:      rgba(14, 38, 28, 0.55);
+  --theme-surface-alt:  rgba(20, 50, 36, 0.70);
+  --theme-border:       rgba(110, 200, 160, 0.16);
+  --theme-input:        rgba(8, 24, 18, 0.70);
+}
+:root.bg-main-slate {
+  --theme-surface:      rgba(28, 36, 50, 0.60);
+  --theme-surface-alt:  rgba(40, 50, 68, 0.74);
+  --theme-border:       rgba(180, 195, 220, 0.12);
+  --theme-input:        rgba(18, 24, 36, 0.70);
+}
+:root.bg-main-sunset {
+  --theme-surface:      rgba(48, 22, 30, 0.55);
+  --theme-surface-alt:  rgba(64, 30, 38, 0.70);
+  --theme-border:       rgba(244, 140, 120, 0.16);
+  --theme-input:        rgba(32, 14, 20, 0.70);
+}
+:root.bg-main-pureBlack {
+  --theme-surface:      rgba(18, 18, 22, 0.65);
+  --theme-surface-alt:  rgba(28, 28, 34, 0.78);
+  --theme-border:       rgba(255, 255, 255, 0.08);
+  --theme-input:        rgba(10, 10, 14, 0.80);
+}
+:root.bg-main-gradient {
+  /* The Vibrant/Renkli preset paints saturated radial orbs on the
+     backdrop — panels need a stronger neutral fill or the colour
+     bleeds into the text. Slight violet bias matches the accent stops
+     in the gradient. */
+  --theme-surface:      rgba(18, 12, 32, 0.72);
+  --theme-surface-alt:  rgba(28, 20, 48, 0.82);
+  --theme-border:       rgba(180, 160, 255, 0.18);
+  --theme-input:        rgba(12, 8, 22, 0.78);
+}
+
+/* ── Transparent panels mode (Layout setting) ─────────────────────
+ * When `transparent-panels` is on, every major card/panel surface
+ * drops its background + border so the page backdrop shows through.
+ * Settings rows are intentionally excluded — those need contrast to
+ * stay legible. Buttons, inputs and modal chrome keep their fills so
+ * inputs stay distinguishable from labels. */
+:root.transparent-panels .panel,
+:root.transparent-panels .stat-card,
+:root.transparent-panels .kcard,
+:root.transparent-panels .task-card,
+:root.transparent-panels .task-row,
+:root.transparent-panels .creator-card,
+:root.transparent-panels .version-card,
+:root.transparent-panels .analytics-card,
+:root.transparent-panels .game-card,
+:root.transparent-panels .integration-card,
+:root.transparent-panels .note-browser,
+:root.transparent-panels .note-browser-item:not(.is-active),
+:root.transparent-panels .storehub-card,
+:root.transparent-panels .wallet-project-card,
+:root.transparent-panels .wallet-list-panel,
+:root.transparent-panels .wallet-entry,
+:root.transparent-panels .wallet-side-stack,
+:root.transparent-panels .release-card,
+:root.transparent-panels .release-template-panel,
+:root.transparent-panels .quick-actions-panel,
+:root.transparent-panels .hero-stat-card,
+:root.transparent-panels .metric-card,
+:root.transparent-panels .dashboard-task-row,
+:root.transparent-panels .moodboard-card,
+:root.transparent-panels .mb-card-body,
+:root.transparent-panels .tab-panel,
+:root.transparent-panels .task-detail-panel,
+:root.transparent-panels .expense-trend-card {
+  background: transparent !important;
+  border-color: transparent !important;
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+/* ── Apply tokens to all major surfaces ──────────────────────────────
+ * One bulk rule per surface family. `!important` is used because the
+ * baseline `.panel { background: rgba(17, 24, 36, 0.8); }` etc. live
+ * at the same specificity as `.bg-main-x .panel` (combined class
+ * specificity won) on some surfaces — using !important keeps the
+ * override stable regardless of CSS source order. Settings rows are
+ * NOT in this list: they have their own structured styling that the
+ * tint would visually shred (gap loss, double-borders). */
+.bg-main-midnight .panel,   .bg-main-midnight .stat-card,
+.bg-main-midnight .kcard,   .bg-main-midnight .task-card,
+.bg-main-midnight .task-row,.bg-main-midnight .creator-card,
+.bg-main-midnight .version-card, .bg-main-midnight .analytics-card,
+.bg-main-midnight .game-card, .bg-main-midnight .integration-card,
+.bg-main-midnight .note-browser, .bg-main-midnight .note-browser-item,
+.bg-main-midnight .storehub-card, .bg-main-midnight .profile-card,
+.bg-main-midnight .modern-brand, .bg-main-midnight .sidebar-workspace-menu,
+.bg-main-midnight .wallet-project-card, .bg-main-midnight .wallet-list-panel,
+.bg-main-midnight .wallet-entry, .bg-main-midnight .wallet-side-stack,
+.bg-main-midnight .release-card, .bg-main-midnight .release-template-panel,
+.bg-main-midnight .pomodoro-widget, .bg-main-midnight .perf-monitor,
+.bg-main-midnight .quick-actions-panel,
+.bg-main-midnight .hero-stat-card, .bg-main-midnight .metric-card,
+.bg-main-midnight .dashboard-task-row, .bg-main-midnight .splash-card,
+.bg-main-midnight .moodboard-card, .bg-main-midnight .mb-card-body,
+.bg-main-midnight .tab-panel, .bg-main-midnight .task-detail-panel,
+.bg-main-midnight .detail-panel-modal, .bg-main-midnight .settings-card,
+.bg-main-midnight .toast,
+.bg-main-ocean .panel,   .bg-main-ocean .stat-card,
+.bg-main-ocean .kcard,   .bg-main-ocean .task-card,
+.bg-main-ocean .task-row,.bg-main-ocean .creator-card,
+.bg-main-ocean .version-card, .bg-main-ocean .analytics-card,
+.bg-main-ocean .game-card, .bg-main-ocean .integration-card,
+.bg-main-ocean .note-browser, .bg-main-ocean .note-browser-item,
+.bg-main-ocean .storehub-card, .bg-main-ocean .profile-card,
+.bg-main-ocean .modern-brand, .bg-main-ocean .sidebar-workspace-menu,
+.bg-main-ocean .wallet-project-card, .bg-main-ocean .wallet-list-panel,
+.bg-main-ocean .wallet-entry, .bg-main-ocean .wallet-side-stack,
+.bg-main-ocean .release-card, .bg-main-ocean .release-template-panel,
+.bg-main-ocean .pomodoro-widget, .bg-main-ocean .perf-monitor,
+.bg-main-ocean .quick-actions-panel,
+.bg-main-ocean .hero-stat-card, .bg-main-ocean .metric-card,
+.bg-main-ocean .dashboard-task-row, .bg-main-ocean .splash-card,
+.bg-main-ocean .moodboard-card, .bg-main-ocean .mb-card-body,
+.bg-main-ocean .tab-panel, .bg-main-ocean .task-detail-panel,
+.bg-main-ocean .detail-panel-modal, .bg-main-ocean .settings-card,
+.bg-main-ocean .toast,
+.bg-main-plum .panel,   .bg-main-plum .stat-card,
+.bg-main-plum .kcard,   .bg-main-plum .task-card,
+.bg-main-plum .task-row,.bg-main-plum .creator-card,
+.bg-main-plum .version-card, .bg-main-plum .analytics-card,
+.bg-main-plum .game-card, .bg-main-plum .integration-card,
+.bg-main-plum .note-browser, .bg-main-plum .note-browser-item,
+.bg-main-plum .storehub-card, .bg-main-plum .profile-card,
+.bg-main-plum .modern-brand, .bg-main-plum .sidebar-workspace-menu,
+.bg-main-plum .wallet-project-card, .bg-main-plum .wallet-list-panel,
+.bg-main-plum .wallet-entry, .bg-main-plum .wallet-side-stack,
+.bg-main-plum .release-card, .bg-main-plum .release-template-panel,
+.bg-main-plum .pomodoro-widget, .bg-main-plum .perf-monitor,
+.bg-main-plum .quick-actions-panel,
+.bg-main-plum .hero-stat-card, .bg-main-plum .metric-card,
+.bg-main-plum .dashboard-task-row, .bg-main-plum .splash-card,
+.bg-main-plum .moodboard-card, .bg-main-plum .mb-card-body,
+.bg-main-plum .tab-panel, .bg-main-plum .task-detail-panel,
+.bg-main-plum .detail-panel-modal, .bg-main-plum .settings-card,
+.bg-main-plum .toast,
+.bg-main-forest .panel,   .bg-main-forest .stat-card,
+.bg-main-forest .kcard,   .bg-main-forest .task-card,
+.bg-main-forest .task-row,.bg-main-forest .creator-card,
+.bg-main-forest .version-card, .bg-main-forest .analytics-card,
+.bg-main-forest .game-card, .bg-main-forest .integration-card,
+.bg-main-forest .note-browser, .bg-main-forest .note-browser-item,
+.bg-main-forest .storehub-card, .bg-main-forest .profile-card,
+.bg-main-forest .modern-brand, .bg-main-forest .sidebar-workspace-menu,
+.bg-main-forest .wallet-project-card, .bg-main-forest .wallet-list-panel,
+.bg-main-forest .wallet-entry, .bg-main-forest .wallet-side-stack,
+.bg-main-forest .release-card, .bg-main-forest .release-template-panel,
+.bg-main-forest .pomodoro-widget, .bg-main-forest .perf-monitor,
+.bg-main-forest .quick-actions-panel,
+.bg-main-forest .hero-stat-card, .bg-main-forest .metric-card,
+.bg-main-forest .dashboard-task-row, .bg-main-forest .splash-card,
+.bg-main-forest .moodboard-card, .bg-main-forest .mb-card-body,
+.bg-main-forest .tab-panel, .bg-main-forest .task-detail-panel,
+.bg-main-forest .detail-panel-modal, .bg-main-forest .settings-card,
+.bg-main-forest .toast,
+.bg-main-slate .panel,   .bg-main-slate .stat-card,
+.bg-main-slate .kcard,   .bg-main-slate .task-card,
+.bg-main-slate .task-row,.bg-main-slate .creator-card,
+.bg-main-slate .version-card, .bg-main-slate .analytics-card,
+.bg-main-slate .game-card, .bg-main-slate .integration-card,
+.bg-main-slate .note-browser, .bg-main-slate .note-browser-item,
+.bg-main-slate .storehub-card, .bg-main-slate .profile-card,
+.bg-main-slate .modern-brand, .bg-main-slate .sidebar-workspace-menu,
+.bg-main-slate .wallet-project-card, .bg-main-slate .wallet-list-panel,
+.bg-main-slate .wallet-entry, .bg-main-slate .wallet-side-stack,
+.bg-main-slate .release-card, .bg-main-slate .release-template-panel,
+.bg-main-slate .pomodoro-widget, .bg-main-slate .perf-monitor,
+.bg-main-slate .quick-actions-panel,
+.bg-main-slate .hero-stat-card, .bg-main-slate .metric-card,
+.bg-main-slate .dashboard-task-row, .bg-main-slate .splash-card,
+.bg-main-slate .moodboard-card, .bg-main-slate .mb-card-body,
+.bg-main-slate .tab-panel, .bg-main-slate .task-detail-panel,
+.bg-main-slate .detail-panel-modal, .bg-main-slate .settings-card,
+.bg-main-slate .toast,
+.bg-main-sunset .panel,   .bg-main-sunset .stat-card,
+.bg-main-sunset .kcard,   .bg-main-sunset .task-card,
+.bg-main-sunset .task-row,.bg-main-sunset .creator-card,
+.bg-main-sunset .version-card, .bg-main-sunset .analytics-card,
+.bg-main-sunset .game-card, .bg-main-sunset .integration-card,
+.bg-main-sunset .note-browser, .bg-main-sunset .note-browser-item,
+.bg-main-sunset .storehub-card, .bg-main-sunset .profile-card,
+.bg-main-sunset .modern-brand, .bg-main-sunset .sidebar-workspace-menu,
+.bg-main-sunset .wallet-project-card, .bg-main-sunset .wallet-list-panel,
+.bg-main-sunset .wallet-entry, .bg-main-sunset .wallet-side-stack,
+.bg-main-sunset .release-card, .bg-main-sunset .release-template-panel,
+.bg-main-sunset .pomodoro-widget, .bg-main-sunset .perf-monitor,
+.bg-main-sunset .quick-actions-panel,
+.bg-main-sunset .hero-stat-card, .bg-main-sunset .metric-card,
+.bg-main-sunset .dashboard-task-row, .bg-main-sunset .splash-card,
+.bg-main-sunset .moodboard-card, .bg-main-sunset .mb-card-body,
+.bg-main-sunset .tab-panel, .bg-main-sunset .task-detail-panel,
+.bg-main-sunset .detail-panel-modal, .bg-main-sunset .settings-card,
+.bg-main-sunset .toast,
+.bg-main-pureBlack .panel,   .bg-main-pureBlack .stat-card,
+.bg-main-pureBlack .kcard,   .bg-main-pureBlack .task-card,
+.bg-main-pureBlack .task-row,.bg-main-pureBlack .creator-card,
+.bg-main-pureBlack .version-card, .bg-main-pureBlack .analytics-card,
+.bg-main-pureBlack .game-card, .bg-main-pureBlack .integration-card,
+.bg-main-pureBlack .note-browser, .bg-main-pureBlack .note-browser-item,
+.bg-main-pureBlack .storehub-card, .bg-main-pureBlack .profile-card,
+.bg-main-pureBlack .modern-brand, .bg-main-pureBlack .sidebar-workspace-menu,
+.bg-main-pureBlack .wallet-project-card, .bg-main-pureBlack .wallet-list-panel,
+.bg-main-pureBlack .wallet-entry, .bg-main-pureBlack .wallet-side-stack,
+.bg-main-pureBlack .release-card, .bg-main-pureBlack .release-template-panel,
+.bg-main-pureBlack .pomodoro-widget, .bg-main-pureBlack .perf-monitor,
+.bg-main-pureBlack .quick-actions-panel,
+.bg-main-pureBlack .hero-stat-card, .bg-main-pureBlack .metric-card,
+.bg-main-pureBlack .dashboard-task-row, .bg-main-pureBlack .splash-card,
+.bg-main-pureBlack .moodboard-card, .bg-main-pureBlack .mb-card-body,
+.bg-main-pureBlack .tab-panel, .bg-main-pureBlack .task-detail-panel,
+.bg-main-pureBlack .detail-panel-modal, .bg-main-pureBlack .settings-card,
+.bg-main-pureBlack .toast,
+.bg-main-gradient .panel,   .bg-main-gradient .stat-card,
+.bg-main-gradient .kcard,   .bg-main-gradient .task-card,
+.bg-main-gradient .task-row,.bg-main-gradient .creator-card,
+.bg-main-gradient .version-card, .bg-main-gradient .analytics-card,
+.bg-main-gradient .game-card, .bg-main-gradient .integration-card,
+.bg-main-gradient .note-browser, .bg-main-gradient .note-browser-item,
+.bg-main-gradient .storehub-card, .bg-main-gradient .profile-card,
+.bg-main-gradient .modern-brand, .bg-main-gradient .sidebar-workspace-menu,
+.bg-main-gradient .wallet-project-card, .bg-main-gradient .wallet-list-panel,
+.bg-main-gradient .wallet-entry, .bg-main-gradient .wallet-side-stack,
+.bg-main-gradient .release-card, .bg-main-gradient .release-template-panel,
+.bg-main-gradient .pomodoro-widget, .bg-main-gradient .perf-monitor,
+.bg-main-gradient .quick-actions-panel,
+.bg-main-gradient .hero-stat-card, .bg-main-gradient .metric-card,
+.bg-main-gradient .dashboard-task-row, .bg-main-gradient .splash-card,
+.bg-main-gradient .moodboard-card, .bg-main-gradient .mb-card-body,
+.bg-main-gradient .tab-panel, .bg-main-gradient .task-detail-panel,
+.bg-main-gradient .detail-panel-modal, .bg-main-gradient .settings-card,
+.bg-main-gradient .toast,
+.bg-main-gradient .expense-trend-card {
+  background: var(--theme-surface, rgba(17, 24, 36, 0.8)) !important;
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.08)) !important;
+}
+
+/* Input/textarea/select surfaces — tinted slightly darker than the
+   surrounding panel so they still read as "input". */
+:root[class*="bg-main-"]:not(.bg-main-standard) .input,
+:root[class*="bg-main-"]:not(.bg-main-standard) input.input,
+:root[class*="bg-main-"]:not(.bg-main-standard) select.input,
+:root[class*="bg-main-"]:not(.bg-main-standard) textarea.input,
+:root[class*="bg-main-"]:not(.bg-main-standard) .kanban-col,
+:root[class*="bg-main-"]:not(.bg-main-standard) .kanban-card-add {
+  background: var(--theme-input, rgba(255, 255, 255, 0.04)) !important;
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.08)) !important;
+}
+
+/* Modals + create-game wizard — replace the slate-blue gradient with
+   the active theme so they blend with the page underneath. */
+:root[class*="bg-main-"]:not(.bg-main-standard) .mb-modal,
+:root[class*="bg-main-"]:not(.bg-main-standard) .modal-content,
+:root[class*="bg-main-"]:not(.bg-main-standard) .create-game-modal-content,
+:root[class*="bg-main-"]:not(.bg-main-standard) .press-kit-modal,
+:root[class*="bg-main-"]:not(.bg-main-standard) .autolock-card,
+:root[class*="bg-main-"]:not(.bg-main-standard) .tutorial-card {
+  background:
+    linear-gradient(180deg,
+      var(--theme-surface-alt, #131c2d) 0%,
+      var(--theme-surface, #0d1421) 100%) !important;
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.08)) !important;
+}
+
+/* Backdrops — match the new themes' darker accent tones. */
+:root[class*="bg-main-"]:not(.bg-main-standard) .press-kit-backdrop,
+:root[class*="bg-main-"]:not(.bg-main-standard) .mb-modal-backdrop,
+:root[class*="bg-main-"]:not(.bg-main-standard) .autolock-overlay {
+  background: rgba(2, 4, 8, 0.75) !important;
+}
+:root.bg-animation-off .profile-backdrop,
+:root.bg-animation-off .storehub-backdrop,
+:root.bg-animation-off [class*="-backdrop"] {
+  display: none !important;
+}
+
+/* Animation toggles — apply broadly so every motion surface respects them */
+:root.page-transitions-off .page-fade,
+:root.page-transitions-off [class*="page-fade"],
+:root.page-transitions-off .tab-content,
+:root.page-transitions-off .tab-panel {
+  animation: none !important;
+  transition: none !important;
+}
+:root.modal-animations-off .mb-modal,
+:root.modal-animations-off .modal,
+:root.modal-animations-off .mb-modal-backdrop,
+:root.modal-animations-off [class*="modal"]:not(.modal-backdrop) {
+  animation: none !important;
+  transition: none !important;
+}
+:root.list-animations-off [class*="list-item"],
+:root.list-animations-off .task-card,
+:root.list-animations-off .note-browser-item,
+:root.list-animations-off .mb-card,
+:root.list-animations-off .game-card,
+:root.list-animations-off .kanban-card,
+:root.list-animations-off .nav-section,
+:root.list-animations-off [data-framer-component-type] {
+  animation: none !important;
+  transition: none !important;
+}
+/* Animation speed enforcement — every element on the page that has
+   a transition or animation gets its duration overridden to the
+   `--anim-duration` token. Component-level CSS still controls *what*
+   transitions, but *how fast* now follows the Layout setting.
+   Selector specificity is 0 so component rules win — only the
+   duration property is forced. */
+:root.anim-speed-managed * {
+  transition-duration: var(--anim-duration, 0.18s) !important;
+  animation-duration: var(--anim-duration, 0.18s) !important;
+}
+
+/* "Instant" animation speed — globally suppress every transition and
+   animation. Catches inline framer-motion styles too via *, ::before,
+   ::after coverage. */
+:root.anim-instant *,
+:root.anim-instant *::before,
+:root.anim-instant *::after,
+:root[style*="--anim-duration: 0s"] *,
+:root[style*="--anim-duration: 0s"] *::before,
+:root[style*="--anim-duration: 0s"] *::after {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* Typography surface application */
+body, button, input, textarea, select {
+  font-family: var(--font-app, inherit);
+}
+strong, b, .hero-stat-value {
+  font-weight: var(--bold-weight, 600);
+}
+:root.tabular-numbers {
+  font-variant-numeric: tabular-nums;
+}
+:root.antialiased {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.markdown-editor, .notes-textarea, .markdown-preview {
+  font-family: var(--font-editor, var(--font-app));
+  font-size: var(--font-size-editor, 13.5px);
+}
+
+/* Focus ring toggle */
+:root.focus-ring-off *:focus-visible {
+  outline: none !important;
 }
 
 * {
@@ -49,7 +501,10 @@ img {
 
 .shell {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  /* v0.9 polish — sidebar width now driven by the Layout
+     preference. `--sidebar-width` is updated live by
+     applyAppearanceToDom whenever the slider moves. */
+  grid-template-columns: var(--sidebar-width, 300px) 1fr;
   height: 100vh;
   overflow: hidden;
 }
@@ -1469,24 +1924,52 @@ label span {
 }
 
 .loading-screen {
-  flex: 1;
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 12px;
+  /* Full-viewport overlay — first-paint loading must take the whole
+     screen, not sit in the workspace grid cell. Previous flex:1 only
+     worked when a parent flex container existed; on initial mount
+     it shrank to its content in the top-left. */
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
   text-align: center;
-  border-radius: 28px;
-  background: linear-gradient(145deg, rgba(14, 24, 39, 0.84), rgba(9, 15, 23, 0.66));
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at 30% 30%, rgba(79, 140, 255, 0.18), transparent 40%),
+    radial-gradient(circle at 70% 70%, rgba(167, 139, 250, 0.16), transparent 40%),
+    #06090f;
+  color: #f4f7fb;
+}
+.loading-screen h2 {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.loading-screen p {
+  margin: 0;
+  font-size: 14px;
+  color: #94a3b8;
+  max-width: 380px;
 }
 
 .loading-orb {
-  width: 52px;
-  height: 52px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, 0.08);
-  border-top-color: #4f8cff;
-  animation: spin 1s linear infinite;
+  border: 4px solid rgba(255, 255, 255, 0.08);
+  border-top-color: var(--accent, #4f8cff);
+  /* The global anim-instant kill-switch would freeze this spinner —
+     we use !important to force it to keep rotating during boot. */
+  animation: loading-orb-spin 1s linear infinite !important;
+  margin-bottom: 4px;
+}
+@keyframes loading-orb-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
 
 .splash-shell {
@@ -3899,8 +4382,8 @@ label span {
 }
 
 .profile-card-settings:hover {
-  background: rgba(79, 140, 255, 0.16);
-  color: #7DC2FF;
+  background: var(--accent-softer);
+  color: var(--accent);
 }
 
 .profile-card-settings:active {
@@ -4279,6 +4762,579 @@ label span {
 .profile-wrapper {
   position: relative;
   z-index: 1;
+}
+
+/* ─── v0.9.x — Settings two-column layout ──────────────────────────────
+ * The Settings page was a 6-screen vertical scroll; v0.9.x reshapes it
+ * into a fixed left nav + scrollable content panel. The grid collapses
+ * to a single column under 900px so the layout survives narrow Tauri
+ * window resizes.                                                       */
+
+.settings-page-header {
+  position: relative;
+  z-index: 1;
+  padding: 4px 4px 14px;
+}
+.settings-page-header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: #f4f7fb;
+}
+
+.settings-layout {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.settings-sidebar {
+  /* Simplified: no card chrome — sidebar reads as a flat nav column
+     against the page backdrop, matching the cleaned-up shell on the
+     right. The sticky-top behaviour is preserved so the nav stays
+     visible while the right column scrolls. */
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 4px 0;
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.settings-sidebar-eyebrow {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #94a3b8;
+  margin: 4px 8px 6px;
+  text-transform: uppercase;
+}
+.settings-sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #c8d8e8;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.settings-sidebar-item:hover {
+  background: rgba(79, 140, 255, 0.06);
+  color: #f4f7fb;
+}
+.settings-sidebar-item.is-active {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(79, 140, 255, 0.12));
+  border-color: rgba(167, 139, 250, 0.40);
+  color: #f4f7fb;
+}
+.settings-sidebar-item:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.55);
+  outline-offset: 1px;
+}
+
+.settings-content {
+  min-width: 0; /* allow children to shrink inside the grid track */
+}
+
+/* ─── v0.9.x M1 — Deep Settings: grouped sidebar + shell ─────────────── */
+
+.settings-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.settings-sidebar-group:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.settings-sidebar-group-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: #64748b;
+  margin: 6px 10px 4px;
+  text-transform: uppercase;
+}
+.settings-sidebar-soon {
+  margin-left: auto;
+  color: #facc15;
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Shell — wraps the active section's content with breadcrumb,
+   action toolbar and a search-footer. The shell itself is the
+   scrollable region; the sidebar stays sticky next to it. */
+.settings-shell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /* Big right-hand panel stays transparent so the page backdrop shows
+     through. Each .setting-row keeps its translucent tint so individual
+     rows still read as discrete cards against the bare panel. */
+  background: transparent !important;
+  border: none !important;
+}
+.settings-shell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 0 4px;
+}
+.settings-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+.settings-breadcrumb-sep {
+  color: #64748b;
+}
+.settings-breadcrumb-leaf {
+  color: #f4f7fb;
+  font-weight: 600;
+}
+.settings-shell-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-shell-actions .icon-button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.settings-shell-body {
+  min-width: 0;
+  flex: 1;
+}
+
+/* Legacy bottom search bar — kept as the class is still referenced by
+   older selectors but no longer rendered. Search now lives in the
+   header (.settings-shell-search-top). */
+.settings-shell-search { display: none; }
+
+.settings-shell-search-top {
+  position: relative;
+  min-width: 240px;
+  max-width: 380px;
+  flex: 1;
+}
+.settings-shell-search-top .settings-search-suggestions {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  margin-top: 0;
+  z-index: 10;
+  box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.55);
+}
+.settings-shell-header {
+  align-items: center;
+}
+.settings-search-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(15, 22, 36, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: #94a3b8;
+}
+.settings-search-input input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #f4f7fb;
+  font-size: 13px;
+  min-width: 0;
+}
+.settings-search-input:focus-within {
+  border-color: rgba(167, 139, 250, 0.45);
+}
+.settings-search-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  background: rgba(15, 22, 36, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 4px;
+}
+.settings-search-suggestion {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #c8d8e8;
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.settings-search-suggestion:hover {
+  background: rgba(79, 140, 255, 0.10);
+  color: #f4f7fb;
+}
+
+/* ─── v0.9 Deep Settings — row-based design language ─────────────────
+ *
+ * The right panel is now a stack of SettingGroups. Each group is a
+ * label + a column of SettingRows. Every row is single-line: title
+ * (+ optional one-line description) on the left, a control on the
+ * right. No hero icons, no paragraph copy, no big rectangle cards.
+ * macOS / Linear / VS Code Settings discipline. */
+
+.settings-section-header {
+  margin-bottom: 22px;
+}
+.settings-section-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: #f4f7fb;
+}
+.settings-section-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+/* Group — title + rows */
+.setting-group {
+  margin-top: 28px;
+}
+.setting-group:first-child {
+  margin-top: 4px;
+}
+.setting-group-header {
+  margin-bottom: 10px;
+  padding: 0 4px;
+}
+.setting-group-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #64748b;
+  font-weight: 600;
+}
+.setting-group-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+.setting-group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Row */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: background 0.14s, border-color 0.14s;
+  min-height: 48px;
+}
+.setting-row:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+.setting-row:focus-within {
+  border-color: rgba(167, 139, 250, 0.40);
+}
+.setting-row.is-disabled {
+  opacity: 0.55;
+}
+.setting-row.is-disabled .setting-row-control {
+  pointer-events: none;
+}
+.setting-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.setting-row-title-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.setting-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #f4f7fb;
+  letter-spacing: -0.005em;
+}
+.setting-row-desc {
+  font-size: 11.5px;
+  color: #94a3b8;
+  font-weight: 400;
+  line-height: 1.4;
+}
+.setting-row-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: rgba(250, 204, 21, 0.14);
+  color: #facc15;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.setting-row-control {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 110px;
+}
+.setting-row-soon-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.10);
+  color: #64748b;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* ── Controls ────────────────────────────────────────────────────── */
+
+/* Toggle — 32×18 pill */
+.setting-toggle {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 99px;
+  border: none;
+  background: rgba(255, 255, 255, 0.10);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.setting-toggle.is-on {
+  background: #a78bfa;
+}
+.setting-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.setting-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 99px;
+  background: #fff;
+  transition: transform 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+.setting-toggle.is-on .setting-toggle-knob {
+  transform: translateX(14px);
+}
+.setting-toggle:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.55);
+  outline-offset: 2px;
+}
+
+/* Pill group — segmented control */
+.setting-pillgroup {
+  display: inline-flex;
+  padding: 2px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  gap: 2px;
+}
+.setting-pill {
+  background: transparent;
+  border: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+.setting-pill:hover {
+  color: #c8d8e8;
+}
+.setting-pill.is-active {
+  background: rgba(167, 139, 250, 0.20);
+  color: #f4f7fb;
+}
+.setting-pill:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Dropdown — native <select> with chevron */
+.setting-dropdown {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.setting-dropdown-select {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  color: #f4f7fb;
+  font-size: 12.5px;
+  padding: 5px 26px 5px 10px;
+  cursor: pointer;
+  min-width: 110px;
+}
+.setting-dropdown-select:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+.setting-dropdown-select:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.55);
+  outline-offset: 1px;
+}
+.setting-dropdown-chevron {
+  position: absolute;
+  right: 8px;
+  color: #64748b;
+  pointer-events: none;
+}
+.setting-dropdown.is-disabled .setting-dropdown-select {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Slider */
+.setting-slider {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.setting-slider-input {
+  width: 140px;
+  accent-color: #a78bfa;
+  cursor: pointer;
+}
+.setting-slider-value {
+  font-size: 12px;
+  color: #c8d8e8;
+  font-variant-numeric: tabular-nums;
+  min-width: 48px;
+  text-align: right;
+}
+
+/* Compact button — used for action rows */
+.setting-compact-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f4f7fb;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s;
+}
+.setting-compact-btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.setting-compact-btn:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.55);
+  outline-offset: 1px;
+}
+.setting-compact-btn.is-danger {
+  color: #fca5a5;
+  border-color: rgba(248, 113, 113, 0.25);
+}
+.setting-compact-btn.is-danger:hover {
+  background: rgba(248, 113, 113, 0.10);
+  border-color: rgba(248, 113, 113, 0.40);
+}
+.setting-compact-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Narrow window: collapse to single column. Sidebar becomes a
+   horizontal tab strip pinned to the top. Mobile-first-style. */
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-sidebar {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px;
+    gap: 6px;
+    scrollbar-width: thin;
+  }
+  .settings-sidebar nav {
+    flex-direction: row;
+    gap: 6px;
+    flex: 1;
+  }
+  .settings-sidebar-eyebrow {
+    display: none;
+  }
+  .settings-sidebar-item {
+    white-space: nowrap;
+  }
+  /* First section's `marginTop: 18` no longer needs to push past the
+     sidebar — flatten it so the spacing looks intentional. */
+  .settings-content > section:first-child,
+  .settings-content > .panel:first-child {
+    margin-top: 8px !important;
+  }
 }
 
 .profile-backdrop {
@@ -5330,6 +6386,21 @@ body.is-resizing {
 .note-browser-item.is-active {
   background: rgba(79, 140, 255, 0.12);
   border-color: rgba(79, 140, 255, 0.28);
+}
+
+/* v0.9 — drag-to-reorder feedback. `cursor: grab` on idle items
+   nudges discoverability; the dragged row dims and the active drop
+   target gains a left-edge indicator. */
+.note-browser-item {
+  cursor: grab;
+  user-select: none;
+}
+.note-browser-item.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+.note-browser-item.is-drop-target {
+  box-shadow: inset 3px 0 0 0 #4f8cff;
 }
 
 .note-browser-title {
@@ -8422,19 +9493,22 @@ body.is-resizing {
   align-items: center;
   padding: 4px 9px;
   border-radius: 999px;
-  background: rgba(79, 140, 255, 0.14);
-  color: #bfd3ff;
+  /* Theme-aware — uses the active accent so the lang pill matches
+     whichever theme is on (Midnight, Sunset, Plum, …) instead of
+     staying frozen to the legacy blue palette. */
+  background: var(--accent-softer);
+  color: var(--accent);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.10em;
-  border: 1px solid rgba(79, 140, 255, 0.22);
+  border: 1px solid var(--accent-strong);
   cursor: pointer;
   transition: background 0.14s, border-color 0.14s, color 0.14s;
 }
 
 .profile-card-lang:hover {
-  background: rgba(79, 140, 255, 0.26);
-  border-color: rgba(79, 140, 255, 0.5);
+  background: var(--accent-soft);
+  border-color: var(--accent);
   color: #ffffff;
 }
 
@@ -8933,6 +10007,22 @@ select:focus-visible,
 
 .cmdk-search-input::placeholder {
   color: #5b6f87;
+}
+
+.cmdk-mode-pill {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--accent-softer);
+  color: var(--accent);
+  margin-right: 6px;
+}
+.cmdk-item-icon {
+  color: var(--accent);
+  margin-right: 8px;
+  flex-shrink: 0;
 }
 
 .cmdk-kbd {
@@ -10734,5 +11824,1774 @@ select:focus-visible,
 .pk-thumb-factsheet.is-dark::after {
   background:
     linear-gradient(180deg, rgba(255,255,255,0.20) 0 12%, transparent 12% 18%, rgba(255,255,255,0.13) 18% 25%, transparent 25% 32%, rgba(255,255,255,0.13) 32% 39%, transparent 39% 46%, rgba(255,255,255,0.13) 46% 53%, transparent 53% 100%);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v0.9 M2 — Live-preview surface overrides
+ *
+ * High-specificity overrides translating appearance/typography/
+ * layout slices into actual visual changes. Loaded last so they win
+ * against earlier rules without `!important` gymnastics (except for
+ * primary-button which had a duplicate gradient definition).
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Accent surface — sidebar active items */
+.sidebar-item.is-active,
+.settings-sidebar-item.is-active,
+.mb-cat-tab.is-active {
+  background: linear-gradient(135deg, var(--accent-soft), var(--accent-softer));
+  border-color: var(--accent-strong);
+}
+:root.accent-skip-sidebar .sidebar-item.is-active,
+:root.accent-skip-sidebar .settings-sidebar-item.is-active {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(79, 140, 255, 0.12));
+  border-color: rgba(167, 139, 250, 0.40);
+}
+
+/* Accent surface — primary buttons + toggle */
+:root:not(.accent-skip-buttons) .primary-button {
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong)) !important;
+}
+:root:not(.accent-skip-buttons) .setting-toggle.is-on {
+  background: var(--accent);
+}
+
+/* Accent surface — links + focus rings */
+:root:not(.accent-skip-links) a:not(.button) {
+  color: var(--accent);
+}
+:root:not(.focus-ring-off) *:focus-visible {
+  outline-color: var(--accent-strong);
+}
+
+/* Status colours wired through */
+.due-chip-overdue { color: var(--status-danger); }
+.due-chip-soon    { color: var(--status-warning); }
+.due-chip-done    { color: var(--status-success); }
+
+/* Density scaling — settings rows + group spacing */
+.setting-row {
+  padding: calc(12px * var(--density-scale)) calc(16px * var(--density-scale));
+  min-height: calc(48px * var(--density-scale));
+}
+.setting-group-rows {
+  gap: calc(8px * var(--density-scale));
+}
+.setting-group {
+  margin-top: calc(28px * var(--density-scale));
+}
+
+/* Corner radius — apply globally to common rounded surfaces */
+.setting-row,
+.setting-compact-btn,
+.setting-dropdown-select,
+.settings-search-input,
+.settings-search-suggestions {
+  border-radius: var(--radius-md, 10px);
+}
+
+/* Animation duration — best-effort wiring on settings + sidebar */
+.setting-row,
+.setting-toggle,
+.setting-pill,
+.settings-sidebar-item,
+.sidebar-item {
+  transition-duration: var(--anim-duration, 0.18s);
+}
+
+/* Modal + hover toggles */
+:root.modal-animations-off .modal,
+:root.modal-animations-off [class*="modal-"]:not(.modal-backdrop) {
+  animation: none !important;
+  transition: none !important;
+}
+:root.hover-effects-off .setting-row:hover,
+:root.hover-effects-off .settings-sidebar-item:hover,
+:root.hover-effects-off .sidebar-item:hover,
+:root.hover-effects-off .mb-card:hover,
+:root.hover-effects-off .quick-action-btn:hover {
+  background: inherit;
+  transform: none;
+  border-color: inherit;
+  box-shadow: none;
+}
+
+/* ── Swatches: accent + status colour pickers ─────────────────────── */
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  padding: 0;
+  cursor: pointer;
+  outline-offset: 2px;
+  transition: transform 0.12s, border-color 0.12s;
+}
+.color-swatch:hover { transform: scale(1.1); }
+.color-swatch.is-selected {
+  border-color: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.accent-swatch-grid {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  max-width: 280px;
+}
+.accent-swatch-custom {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 2px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 99px;
+}
+.accent-swatch-custom.is-active {
+  border-color: var(--accent-strong);
+  border-style: solid;
+}
+.accent-swatch-custom-preview {
+  width: 16px;
+  height: 16px;
+  border-radius: 99px;
+}
+.accent-swatch-custom-input {
+  background: transparent;
+  border: none;
+  color: #f4f7fb;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px;
+  width: 64px;
+  outline: none;
+  text-transform: lowercase;
+}
+.color-dot-wrap {
+  position: relative;
+  display: inline-flex;
+  cursor: pointer;
+}
+.color-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+}
+.color-dot-wrap:hover .color-dot { border-color: rgba(255, 255, 255, 0.30); }
+.color-dot-native {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* ─── v0.9 M3 — Profile / General / Keyboard / About controls ───── */
+
+/* TextInput + TextArea */
+.setting-text-input,
+.setting-text-area {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  color: #f4f7fb;
+  font-size: 12.5px;
+  padding: 5px 10px;
+  outline: none;
+  transition: border-color 0.14s, background 0.14s;
+  font-family: inherit;
+}
+.setting-text-input:hover,
+.setting-text-area:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.setting-text-input:focus,
+.setting-text-area:focus {
+  border-color: var(--accent-strong);
+  background: rgba(255, 255, 255, 0.07);
+}
+.setting-text-area {
+  resize: vertical;
+  min-height: 44px;
+  line-height: 1.4;
+}
+
+/* ChipInput */
+.setting-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+  max-width: 280px;
+}
+.setting-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 10px;
+  background: var(--accent-softer);
+  border: 1px solid var(--accent-strong);
+  border-radius: 99px;
+  color: #f4f7fb;
+  font-size: 11.5px;
+}
+.setting-chip-remove {
+  background: transparent;
+  border: none;
+  color: #c8d8e8;
+  width: 16px;
+  height: 16px;
+  border-radius: 99px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.setting-chip-remove:hover {
+  background: rgba(248, 113, 113, 0.25);
+  color: #fecaca;
+}
+.setting-chip-input {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.20);
+  border-radius: 99px;
+  color: #f4f7fb;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  outline: none;
+  width: 110px;
+}
+.setting-chip-input:focus {
+  border-color: var(--accent-strong);
+  border-style: solid;
+}
+.setting-chip-add {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.20);
+  border-radius: 99px;
+  color: #94a3b8;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.setting-chip-add:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4f7fb;
+  border-style: solid;
+}
+.setting-chip-presets {
+  flex-basis: 100%;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.setting-chip-preset {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 99px;
+  color: #94a3b8;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.setting-chip-preset:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #c8d8e8;
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* KeyComboButton */
+.setting-key-combo {
+  background: rgba(0, 0, 0, 0.30);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  color: #c8d8e8;
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 11.5px;
+  padding: 5px 10px;
+  cursor: pointer;
+  min-width: 130px;
+  text-align: center;
+  letter-spacing: 0.02em;
+  transition: border-color 0.14s, background 0.14s;
+}
+.setting-key-combo:hover {
+  background: rgba(0, 0, 0, 0.45);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.setting-key-combo.is-capturing {
+  background: var(--accent-softer);
+  border: 1px dashed var(--accent-strong);
+  color: var(--accent);
+  font-family: inherit;
+  font-style: italic;
+}
+
+/* Avatar control row */
+.setting-avatar-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.setting-avatar-preview,
+.setting-avatar-placeholder {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.04);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Version + conflict chrome */
+.setting-version-tag {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: var(--accent-softer);
+  border: 1px solid var(--accent-strong);
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.setting-version-tag-muted {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.10);
+  color: #94a3b8;
+}
+
+.settings-conflict-banner {
+  background: rgba(248, 113, 113, 0.10);
+  border: 1px solid rgba(248, 113, 113, 0.30);
+  color: #fecaca;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  margin-bottom: 12px;
+}
+
+/* ─── v0.9 M4 — Pomodoro floating widget ────────────────────────── */
+
+.pomodoro-widget {
+  position: fixed;
+  /* Sits above the ProfileViewModal (1000) and any in-flow toast.
+     Stable across theme switches because the inline style wins over
+     the theme-tinted !important overrides for this class. */
+  z-index: 1500;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 12px;
+  background: rgba(15, 22, 36, 0.92);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--accent-strong);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.6);
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+  color: #f4f7fb;
+}
+/* Pomodoro stays opaque under any active theme — the tinted-surface
+   override would otherwise let the underlying page show through. */
+:root[class*="bg-main-"]:not(.bg-main-standard) .pomodoro-widget {
+  background: rgba(10, 14, 22, 0.94) !important;
+  border-color: var(--accent-strong) !important;
+}
+
+.pomodoro-widget-pos-topRight    { top: 18px;    right: 22px; }
+.pomodoro-widget-pos-bottomLeft  { bottom: 22px; left: 22px; }
+.pomodoro-widget-pos-floating    { top: 24px;    right: 22px; }
+
+.pomodoro-widget-phase-shortBreak { border-color: var(--status-info); }
+.pomodoro-widget-phase-longBreak  { border-color: var(--status-success); }
+
+.pomodoro-widget-phase-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #94a3b8;
+  text-transform: uppercase;
+}
+.pomodoro-widget-time {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+.pomodoro-widget-actions {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 2px;
+}
+.pomodoro-widget-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+  color: #c8d8e8;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.pomodoro-widget-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+/* "bar" style keeps the chip but anchors a thin progress line. */
+.pomodoro-widget-style-bar::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+/* "circle" style — the SVG ring sits at the leading edge of the chip
+   and animates clockwise as phase elapses. The widget is rendered
+   from PomodoroWidget.tsx using strokeDashoffset transitions. */
+.pomodoro-widget-ring {
+  flex-shrink: 0;
+}
+.pomodoro-widget-ring circle:last-child {
+  transition: stroke-dashoffset 0.4s linear;
+}
+
+/* ─── v0.9 M5 — Storage bar + backup history ────────────────────── */
+
+.storage-bar {
+  width: 240px;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.storage-bar-fill {
+  display: inline-block;
+  height: 100%;
+  transition: width 0.18s ease;
+}
+
+.backup-history-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px;
+}
+.backup-history-kind {
+  font-family: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 99px;
+  text-transform: uppercase;
+}
+.backup-history-kind.is-auto {
+  background: var(--accent-softer);
+  color: var(--accent);
+}
+.backup-history-kind.is-manual {
+  background: rgba(255, 255, 255, 0.06);
+  color: #94a3b8;
+}
+
+/* ─── v0.9 M6 — Password input + info banner ─────────────────────── */
+
+.setting-password-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.setting-password-wrap .setting-text-input {
+  padding-right: 28px; /* space for the toggle icon */
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", monospace;
+  letter-spacing: 0.02em;
+}
+.setting-password-toggle {
+  position: absolute;
+  right: 6px;
+  background: transparent;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.setting-password-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f4f7fb;
+}
+.setting-password-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.settings-info-banner {
+  background: var(--accent-faint);
+  border: 1px solid var(--accent-strong);
+  color: #cbd5e1;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+/* ─── v0.9 M7 — Auto-lock overlay, perf monitor, screenshot mode ── */
+
+.autolock-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 8, 14, 0.92);
+  backdrop-filter: blur(16px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.autolock-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 36px 48px;
+  background: linear-gradient(180deg, #131c2d, #0d1421);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  max-width: 400px;
+}
+.autolock-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--accent-softer);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.autolock-card h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #f4f7fb;
+}
+.autolock-card p {
+  margin: 0 0 18px;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.perf-monitor {
+  position: fixed;
+  bottom: 18px;
+  right: 22px;
+  z-index: 1050;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  color: #94a3b8;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+.perf-monitor-row strong {
+  color: var(--accent);
+  margin-left: 4px;
+  font-weight: 700;
+}
+
+/* Screenshot mode — blur every password input + secret-looking
+   field. Targets controls likely to expose API keys / tokens. The
+   blur is heavy enough to obscure characters while still showing
+   the user "this is filled in". */
+:root.screenshot-mode .setting-password-wrap .setting-text-input,
+:root.screenshot-mode input[type="password"] {
+  filter: blur(5px);
+  transition: filter 0.15s;
+}
+:root.screenshot-mode .setting-password-wrap:hover .setting-text-input,
+:root.screenshot-mode .setting-password-wrap:focus-within .setting-text-input {
+  filter: blur(0);
+}
+
+/* Screenshot mode — redact API-derived data so the user can publish
+   marketing screenshots without leaking app IDs, revenue, currency
+   conversions, follower counts, real emails, or store handles. */
+:root.screenshot-mode [data-redact],
+:root.screenshot-mode .integration-card input,
+:root.screenshot-mode .integration-card .input,
+:root.screenshot-mode .store-card .stat-value,
+:root.screenshot-mode .storehub-card .stat-value,
+:root.screenshot-mode .storehub-card .storehub-revenue-value,
+:root.screenshot-mode .wallet-card .stat-value,
+:root.screenshot-mode .api-key-display,
+:root.screenshot-mode [data-api-value],
+:root.screenshot-mode .profile-view-meta-row,
+:root.screenshot-mode .profile-view-social-value {
+  filter: blur(6px);
+  transition: filter 0.15s;
+  user-select: none;
+}
+:root.screenshot-mode [data-redact]:hover,
+:root.screenshot-mode .integration-card input:focus,
+:root.screenshot-mode .integration-card:hover .input,
+:root.screenshot-mode [data-api-value]:hover {
+  filter: blur(0);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * v0.9 polish — Settings really apply globally
+ *
+ * Earlier override blocks only touched a handful of surfaces.
+ * The block below extends the wiring so every Appearance /
+ * Typography / Layout knob has a visible effect across the app,
+ * not just on the Settings page itself.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Sidebar background variants ─────────────────────────────────────
+   These ONLY affect the main app sidebar (`.sidebar.modern-sidebar`),
+   never the in-page Settings sidebar (`.settings-sidebar`) or moodboard
+   category tabs. Each variant overrides the hard-coded radial gradient
+   from line ~130. */
+:root.bg-sidebar-darker .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0.72)) !important;
+}
+:root.bg-sidebar-transparent .sidebar.modern-sidebar {
+  background: transparent !important;
+  backdrop-filter: blur(10px);
+  border-right: 0 !important;
+  /* Theme override paints a tinted border-color on most surfaces —
+     null it here so transparent stays fully borderless. */
+  border-color: transparent !important;
+}
+:root.bg-sidebar-transparent .sidebar.modern-sidebar::after {
+  display: none !important;
+}
+:root.bg-sidebar-midnight .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(7, 12, 25, 0.92)) !important;
+}
+:root.bg-sidebar-ocean .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(6, 33, 52, 0.96), rgba(2, 18, 30, 0.92)) !important;
+}
+:root.bg-sidebar-plum .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(40, 18, 58, 0.96), rgba(22, 10, 30, 0.92)) !important;
+}
+:root.bg-sidebar-forest .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(8, 32, 24, 0.96), rgba(4, 18, 14, 0.92)) !important;
+}
+:root.bg-sidebar-slate .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(28, 34, 46, 0.96), rgba(15, 19, 28, 0.92)) !important;
+}
+:root.bg-sidebar-sunset .sidebar.modern-sidebar {
+  background:
+    linear-gradient(180deg, rgba(40, 16, 18, 0.96), rgba(24, 8, 14, 0.92)) !important;
+}
+
+/* ── Accent surface — extend coverage ────────────────────────────── */
+:root:not(.accent-skip-links) .nav-link,
+:root:not(.accent-skip-links) a {
+  color: var(--accent);
+}
+:root:not(.accent-skip-progress) [class*="progress"] [class*="fill"],
+:root:not(.accent-skip-progress) .pomodoro-widget-style-bar::after,
+:root:not(.accent-skip-progress) .storage-bar-fill:first-child {
+  background: var(--accent) !important;
+}
+:root:not(.accent-skip-buttons) .secondary-button:hover {
+  border-color: var(--accent-strong);
+}
+
+/* ── Status colours — broader application ────────────────────────── */
+.status-tag-live, [data-status="live"] { color: var(--status-success); }
+.status-tag-beta, [data-status="beta"] { color: var(--status-warning); }
+.status-tag-ready                       { color: var(--status-info); }
+.toast-success, .toast.success { color: var(--status-success); }
+.toast-error,   .toast.error   { color: var(--status-danger); }
+.toast-warning, .toast.warning { color: var(--status-warning); }
+.toast-info,    .toast.info    { color: var(--status-info); }
+
+/* ── Typography — global cascade for headings + body ─────────────── */
+body, p, span, button, input, textarea, select, .label, .eyebrow {
+  letter-spacing: var(--letter-spacing, 0);
+}
+h1, .dashboard-title, .settings-section-title, .detail-modal h2,
+.detail-modal h3, .panel-head h3, .game-detail h2, .game-card-title {
+  font-size: calc(var(--font-size-base, 14px) * 1.65 * var(--heading-scale, 1));
+  line-height: calc(var(--line-height, 1.55) * 0.9);
+}
+h2 {
+  font-size: calc(var(--font-size-base, 14px) * 1.40 * var(--heading-scale, 1));
+}
+h3 {
+  font-size: calc(var(--font-size-base, 14px) * 1.18 * var(--heading-scale, 1));
+}
+h4, .panel-head .label {
+  font-size: calc(var(--font-size-base, 14px) * 1.00 * var(--heading-scale, 1));
+}
+strong, b, .strong, .hero-stat-value, h1, h2, h3, h4, h5 {
+  font-weight: var(--bold-weight, 600);
+}
+.markdown-editor, .notes-textarea, .markdown-preview, code, pre {
+  font-family: var(--font-editor, inherit);
+  font-size: var(--font-size-editor, 13.5px);
+}
+
+/* ── Layout — global density + corner radius + anim duration ────── */
+/* Density scales padding on common card-style surfaces. We use
+   a tame multiplier so the cards don't deform — content stays
+   readable in all three settings. */
+.panel,
+.kcard,
+.task-card,
+.note-browser-item,
+.mb-card-body {
+  padding: calc(var(--density-base-y, 14px) * var(--density-scale, 1))
+           calc(var(--density-base-x, 16px) * var(--density-scale, 1));
+}
+.dashboard-grid { gap: calc(14px * var(--density-scale, 1)); }
+.kanban-col-stack { gap: calc(10px * var(--density-scale, 1)); }
+
+/* Corner radius — apply to most rounded surfaces app-wide */
+.panel,
+.kcard,
+.task-card,
+.modal,
+.modal-content,
+.mb-modal,
+.setting-version-tag,
+.create-game-modal-content,
+.profile-card,
+.workspace-row,
+.toast {
+  border-radius: var(--radius-md, 10px);
+}
+/* Compact surfaces use 60% of the var so radius slider still feels
+   proportional at extremes (Square → mostly square, Soft → buttery). */
+.primary-button, .secondary-button, .icon-button,
+.kanban-card-add, .mb-cat-tab, .mb-thumb-strip-item,
+.note-action-btn, .quick-action-btn {
+  border-radius: calc(var(--radius-md, 10px) * 0.7);
+}
+
+/* Border weight — wire to vars on standard bordered surfaces */
+.panel, .kcard, .task-card,
+.mb-modal, .create-game-modal-content,
+.note-browser-item.is-active,
+.setting-row, .setting-compact-btn,
+.setting-dropdown-select, .setting-text-input,
+.setting-text-area {
+  border-width: var(--border-weight, 1px);
+}
+
+/* Animation duration — broaden to common motion surfaces */
+.panel,
+.kcard,
+.sidebar-item,
+.settings-sidebar-item,
+.note-browser-item,
+.mb-card,
+.mb-cat-tab,
+.task-card,
+.primary-button,
+.secondary-button,
+.icon-button,
+.quick-action-btn,
+.profile-card-main {
+  transition-duration: var(--anim-duration, 0.18s);
+}
+
+/* Hover effects — extend off-class to broader selectors */
+:root.hover-effects-off .panel:hover,
+:root.hover-effects-off .kcard:hover,
+:root.hover-effects-off .task-card:hover,
+:root.hover-effects-off .quick-action-btn:hover,
+:root.hover-effects-off .mb-thumb-strip-item:hover,
+:root.hover-effects-off .note-browser-item:hover,
+:root.hover-effects-off .primary-button:hover,
+:root.hover-effects-off .secondary-button:hover {
+  background: inherit;
+  transform: none;
+  border-color: inherit;
+  box-shadow: none;
+  filter: none;
+}
+
+/* List density classes — drive task / note row paddings. The
+   density slice exposes its values via body classes; CSS reads them. */
+:root.task-row-compact  .task-card  { padding: 6px 10px; }
+:root.task-row-relaxed  .task-card  { padding: 16px 20px; }
+:root.note-row-compact  .note-browser-item { padding: 5px 8px; }
+:root.note-row-relaxed  .note-browser-item { padding: 12px 14px; }
+:root.store-card-small  .storehub-card { transform: scale(0.92); }
+:root.store-card-large  .storehub-card { transform: scale(1.06); }
+
+/* ── Native select dropdown — dark theme options ─────────────────── */
+/* Most engines pick the OS popup for <option>, but Chromium-on-Tauri
+   honours these properties so the open list matches the dark UI. */
+.setting-dropdown-select option {
+  background: #131c2d;
+  color: #f4f7fb;
+}
+.setting-dropdown-select option:checked {
+  background: var(--accent-soft);
+  color: #ffffff;
+}
+/* General <select> in older surfaces (Wallet etc.) inherits same look */
+select.input option {
+  background: #131c2d;
+  color: #f4f7fb;
+}
+
+/* ── Page transitions off — kill route fades ─────────────────────── */
+:root.page-transitions-off .page-fade {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
+
+/* ── Sidebar group headers off — for sidebar collapse toggle ─────── */
+:root.sidebar-group-headers-off .sidebar-section-title,
+:root.sidebar-group-headers-off .sidebar-group-label,
+:root.sidebar-group-headers-off .nav-section-label {
+  display: none;
+}
+
+/* ── ProfileView modal — viewport-centered panel ───────────────────
+ * Portaled to <body> (see ProfileViewModal.tsx), so the backdrop and
+ * panel align to the FULL viewport. The panel itself is a centered
+ * card (~min(1080px, 92vw) × ~min(820px, 88vh)), not fullscreen,
+ * with the scroll bar on the far right of the panel. ESC closes it
+ * via a keyboard handler in the component. */
+.profile-view-fs-backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  padding: 0 !important;
+  z-index: 1000 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: rgba(5, 8, 16, 0.78) !important;
+  backdrop-filter: blur(10px);
+}
+.profile-view-modal {
+  position: relative !important;
+  width: min(1080px, 92vw) !important;
+  height: min(820px, 88vh) !important;
+  max-width: 92vw !important;
+  max-height: 88vh !important;
+  border-radius: 22px !important;
+  overflow: hidden !important;
+  display: grid !important;
+  grid-template-columns: 1fr !important;
+  grid-template-rows: 1fr !important;
+  margin: 0 !important;
+  /* Subtle hero accent at the top so the modal doesn't read as a flat
+     box. The radial sits behind the avatar in the hero, fading into
+     the panel's neutral base. */
+  background:
+    radial-gradient(circle at 50% 0%, var(--accent-soft) 0%, transparent 36%),
+    linear-gradient(180deg, rgba(20, 28, 48, 0.96), rgba(13, 20, 33, 0.96)) !important;
+  border: 1px solid var(--accent-strong) !important;
+  box-shadow: 0 28px 80px -16px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.03) inset !important;
+}
+.profile-view-modal .mb-modal-side {
+  overflow-y: auto;
+  padding: 0;
+  width: 100%;
+}
+.profile-view-modal .mb-modal-side > * {
+  padding-left: clamp(28px, 5vw, 64px);
+  padding-right: clamp(28px, 5vw, 64px);
+}
+.profile-view-hero-banner {
+  position: relative;
+  padding: 48px clamp(28px, 5vw, 64px) 24px;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(167, 139, 250, 0.18), transparent 40%),
+    radial-gradient(circle at 80% 100%, var(--accent-softer), transparent 40%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.profile-view-hero-banner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(90deg, transparent 0%, transparent 33%, rgba(255, 255, 255, 0.02) 33%, rgba(255, 255, 255, 0.02) 66%, transparent 66%),
+    linear-gradient(0deg, transparent 0%, transparent 50%, rgba(255, 255, 255, 0.02) 50%);
+  background-size: 36px 36px;
+  opacity: 0.4;
+  pointer-events: none;
+}
+.profile-view-hero { position: relative; z-index: 1; }
+.profile-view-avatar {
+  border: 3px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 16px 32px -8px rgba(0, 0, 0, 0.6);
+}
+
+/* Pill stack — bigger meta row */
+.profile-view-meta-row {
+  padding: 6px 12px;
+  font-size: 12.5px;
+  border-radius: 999px;
+}
+.profile-view-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 24px 0 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+.profile-view-section-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), transparent);
+}
+.profile-view-section-title .profile-view-section-icon {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  display: inline-grid; place-items: center;
+  background: var(--accent-softer);
+  color: var(--accent);
+}
+
+/* Field card upgrade */
+.profile-view-field {
+  padding: 12px 16px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 12px !important;
+  transition: border-color 0.14s, background 0.14s;
+}
+.profile-view-field:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: var(--accent-strong) !important;
+}
+
+/* Brand swatches go bigger */
+.profile-view-brand-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+.profile-view-brand-card {
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.profile-view-brand-card .profile-view-brand-swatch {
+  width: 44px; height: 44px;
+}
+.profile-view-brand-card div small {
+  display: block;
+  color: #94a3b8;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.profile-view-brand-card div strong {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+}
+
+/* Studio banner gradient using the user's brand colours */
+.profile-view-studio-banner {
+  position: relative;
+  padding: 18px 18px 14px;
+  margin-top: 8px;
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, var(--studio-primary, var(--accent)) 0%, var(--studio-secondary, var(--accent-strong)) 100%);
+  color: #fff;
+  overflow: hidden;
+}
+.profile-view-studio-banner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.35));
+}
+.profile-view-studio-banner > * { position: relative; z-index: 1; }
+.profile-view-studio-banner h3 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.01em;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.profile-view-studio-banner .profile-view-studio-meta {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 12px;
+}
+.profile-view-studio-banner .profile-view-studio-meta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  margin-right: 6px;
+  background: rgba(0, 0, 0, 0.30);
+  border-radius: 999px;
+}
+.profile-view-fullscreen-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 32px;
+  margin-top: 24px;
+}
+@media (max-width: 880px) {
+  .profile-view-fullscreen-grid { grid-template-columns: 1fr; }
+}
+.profile-view-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+.profile-view-field-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  font-weight: 700;
+}
+.profile-view-field-value {
+  font-size: 13px;
+  color: #f4f7fb;
+  word-break: break-word;
+}
+.profile-view-field-value.is-empty { color: #64748b; font-style: italic; }
+.profile-view-field-list {
+  display: flex; flex-direction: column; gap: 6px;
+}
+
+/* ── Busy indicator (long-running ops) ───────────────────────────
+ * Floating chip in the bottom-left so it doesn't fight the
+ * QuickCapture FAB or Pomodoro chip on the right edge. Spinner
+ * uses a custom keyframe instead of framer-motion so the global
+ * `anim-instant` kill-switch doesn't disable the reassurance
+ * indicator — users in instant-mode still need to know the app is
+ * busy. */
+.busy-indicator {
+  position: fixed;
+  left: 22px;
+  bottom: 22px;
+  z-index: 1300;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: rgba(15, 22, 36, 0.96);
+  border: 1px solid var(--accent-strong);
+  border-radius: 999px;
+  color: #f4f7fb;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 10px 30px -8px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.busy-indicator em {
+  font-style: normal;
+  color: var(--accent);
+  margin-left: 4px;
+  font-weight: 700;
+}
+.busy-indicator-spin {
+  color: var(--accent);
+  /* Force-spin even when the global anim-instant class is on — this
+     specific spinner is the one place we want to keep moving so the
+     user sees the app is alive. */
+  animation: busy-spin 0.9s linear infinite !important;
+}
+@keyframes busy-spin {
+  from { transform: rotate(0deg);   }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── Press kit preview pane ─────────────────────────────────────── */
+.press-kit-preview-pane {
+  margin: 0 24px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.press-kit-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #94a3b8;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.press-kit-preview-head small {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #64748b;
+}
+.press-kit-preview-frame {
+  width: 100%;
+  height: 320px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: #fff;
+}
+
+/* ── Markdown slash-command palette ───────────────────────────── */
+.notes-textarea-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.notes-textarea-wrap > textarea { flex: 1; }
+
+/* ── Single-pane WYSIWYG editor (v0.9.x rewrite) ───────────────── */
+.notes-single-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: rgba(15, 22, 36, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.notes-rich-editor {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px clamp(24px, 4vw, 56px);
+  color: #f4f7fb;
+  font-family: var(--font-editor, var(--font-app, "Segoe UI", sans-serif));
+  font-size: var(--font-size-editor, 14px);
+  line-height: 1.65;
+  outline: none;
+  caret-color: var(--accent);
+}
+.notes-rich-editor[data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: #5b6f87;
+  pointer-events: none;
+}
+.notes-rich-editor h1 { font-size: 26px; font-weight: 800; margin: 18px 0 8px; letter-spacing: -0.01em; }
+.notes-rich-editor h2 { font-size: 21px; font-weight: 700; margin: 16px 0 6px; }
+.notes-rich-editor h3 { font-size: 17px; font-weight: 700; margin: 14px 0 6px; color: #cbd5e1; }
+.notes-rich-editor p  { margin: 6px 0 12px; }
+.notes-rich-editor ul, .notes-rich-editor ol {
+  margin: 6px 0 12px; padding-left: 24px;
+}
+.notes-rich-editor li { margin-bottom: 4px; }
+.notes-rich-editor a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-strong);
+  text-underline-offset: 3px;
+}
+.notes-rich-editor blockquote {
+  margin: 12px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--accent-strong);
+  background: var(--accent-faint);
+  border-radius: 0 8px 8px 0;
+  color: #cbd5e1;
+}
+.notes-rich-editor code {
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+  font-size: 0.92em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.notes-rich-editor pre {
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 12px 0;
+}
+.notes-rich-editor pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+.notes-rich-editor hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  margin: 18px 0;
+}
+.notes-rich-editor .note-table,
+.notes-rich-editor table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.notes-rich-editor th,
+.notes-rich-editor td {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  padding: 8px 12px;
+  text-align: left;
+}
+.notes-rich-editor thead th {
+  background: var(--accent-softer);
+  color: var(--accent);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+.notes-rich-editor .note-checklist {
+  list-style: none;
+  padding-left: 0;
+}
+.notes-rich-editor .note-checklist input[type="checkbox"] {
+  margin-right: 8px;
+  accent-color: var(--accent);
+}
+/* Focus visual cue */
+.notes-rich-editor:focus { box-shadow: inset 0 0 0 1px var(--accent-strong); }
+.markdown-slash-palette {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  width: 320px;
+  max-height: 280px;
+  overflow-y: auto;
+  z-index: 20;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.97), rgba(13, 20, 33, 0.97));
+  border: 1px solid var(--accent-strong);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.65);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: slash-in 0.12s ease-out;
+}
+@keyframes slash-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.markdown-slash-hint {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  margin: 4px 8px 6px;
+  font-weight: 700;
+}
+.markdown-slash-item {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #f4f7fb;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.10s;
+}
+.markdown-slash-item:hover, .markdown-slash-item.is-active {
+  background: var(--accent-softer);
+  border-color: var(--accent-strong);
+}
+.markdown-slash-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+.markdown-slash-item strong { display: block; font-size: 12.5px; font-weight: 600; }
+.markdown-slash-item small  { display: block; font-size: 10.5px; color: #94a3b8; }
+.markdown-slash-item kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: #94a3b8;
+}
+
+/* ── Wallet expense trend chart ────────────────────────────────── */
+.expense-trend-card {
+  background: rgba(17, 24, 36, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 18px;
+  margin: 14px 0;
+  backdrop-filter: blur(14px);
+}
+/* Theme override — pick up the active surface so the chart card
+   matches Midnight/Ocean/Plum/etc. instead of staying slate-blue. */
+:root[class*="bg-main-"]:not(.bg-main-standard) .expense-trend-card {
+  background: var(--theme-surface, rgba(17, 24, 36, 0.8)) !important;
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.08)) !important;
+}
+.expense-trend-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+.expense-trend-head h3 {
+  margin: 4px 0 0;
+  font-size: 18px;
+}
+.expense-trend-delta {
+  font-size: 22px;
+  font-weight: 700;
+  text-align: right;
+  line-height: 1;
+}
+.expense-trend-delta small {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: #94a3b8;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.expense-trend-chart-wrap {
+  width: 100%;
+}
+
+/* ── Quick-capture FAB (bottom-right corner) ──────────────────────
+ * Floating action button + dropdown popover for fast note/task
+ * creation from any page. Z-index sits between modals (1000) and
+ * the pomodoro chip (1500) so it stays reachable but never covers
+ * an active dialog. */
+.quick-capture-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.55), 0 0 0 4px var(--accent-softer);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+  transition: transform 0.16s, box-shadow 0.16s;
+}
+.quick-capture-fab:hover { transform: scale(1.06); }
+.quick-capture-fab.is-open { transform: rotate(45deg); }
+.quick-capture-pop {
+  position: fixed;
+  right: 22px;
+  bottom: 80px;
+  width: 240px;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.96), rgba(13, 20, 33, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  box-shadow: 0 22px 50px -12px rgba(0, 0, 0, 0.65);
+  z-index: 1200;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  animation: quick-capture-in 0.16s ease-out;
+}
+@keyframes quick-capture-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+.quick-capture-act {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #f4f7fb;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s, border-color 0.14s;
+}
+.quick-capture-act:hover {
+  background: var(--accent-softer);
+  border-color: var(--accent-strong);
+}
+.quick-capture-act strong { display: block; font-size: 12.5px; font-weight: 600; }
+.quick-capture-act small  { display: block; font-size: 10.5px; color: #94a3b8; margin-top: 1px; }
+.quick-capture-hint {
+  font-size: 10px;
+  color: #94a3b8;
+  padding: 4px 10px 2px;
+  letter-spacing: 0.02em;
+}
+.quick-capture-hint kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  margin: 0 2px;
+}
+
+/* ── Theme preview cards (Settings → Theme) ─────────────────────── */
+.theme-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+.theme-preview-card {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  transition: border-color 0.14s, transform 0.14s;
+  color: #c8d8e8;
+}
+.theme-preview-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+.theme-preview-card.is-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-softer) inset;
+}
+.theme-preview-shell {
+  position: relative;
+  height: 78px;
+  border-radius: 6px;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 38% 62%;
+}
+.theme-preview-shell-standard  { background: radial-gradient(circle at top left, rgba(79, 140, 255, 0.18), transparent 40%), #091018; }
+.theme-preview-shell-pureBlack { background: #060709; }
+.theme-preview-shell-gradient  { background: radial-gradient(circle at top, rgba(167, 139, 250, 0.40), #050810); }
+.theme-preview-shell-midnight  { background: radial-gradient(circle at top right, rgba(79, 140, 255, 0.30), #07091a); }
+.theme-preview-shell-ocean     { background: radial-gradient(circle at top left, rgba(34, 211, 238, 0.30), #061522); }
+.theme-preview-shell-plum      { background: radial-gradient(circle at top right, rgba(167, 139, 250, 0.32), #110a1a); }
+.theme-preview-shell-forest    { background: radial-gradient(circle at top left, rgba(52, 211, 153, 0.28), #07140f); }
+.theme-preview-shell-slate     { background: #0d131c; }
+.theme-preview-shell-sunset    { background: radial-gradient(circle at top left, rgba(251, 146, 60, 0.30), #160b10); }
+
+.theme-preview-sidebar {
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: linear-gradient(180deg, rgba(8, 13, 22, 0.96), rgba(7, 12, 20, 0.88));
+}
+.theme-preview-sidebar-dark        { background: linear-gradient(180deg, rgba(8, 13, 22, 0.96), rgba(7, 12, 20, 0.88)); }
+.theme-preview-sidebar-darker      { background: linear-gradient(180deg, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0.72)); }
+.theme-preview-sidebar-transparent { background: transparent; }
+.theme-preview-sidebar-midnight    { background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(7, 12, 25, 0.92)); }
+.theme-preview-sidebar-ocean       { background: linear-gradient(180deg, rgba(6, 33, 52, 0.96), rgba(2, 18, 30, 0.92)); }
+.theme-preview-sidebar-plum        { background: linear-gradient(180deg, rgba(40, 18, 58, 0.96), rgba(22, 10, 30, 0.92)); }
+.theme-preview-sidebar-forest      { background: linear-gradient(180deg, rgba(8, 32, 24, 0.96), rgba(4, 18, 14, 0.92)); }
+.theme-preview-sidebar-slate       { background: linear-gradient(180deg, rgba(28, 34, 46, 0.96), rgba(15, 19, 28, 0.92)); }
+.theme-preview-sidebar-sunset      { background: linear-gradient(180deg, rgba(40, 16, 18, 0.96), rgba(24, 8, 14, 0.92)); }
+
+.theme-preview-brand {
+  height: 8px;
+  border-radius: 2px;
+  margin: 0 2px 4px;
+}
+.theme-preview-nav {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 99px;
+  margin: 0 4px;
+}
+.theme-preview-nav-active {
+  background: var(--accent);
+  margin: 0 2px 0 4px;
+  width: 80%;
+}
+.theme-preview-main {
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.theme-preview-card-pill {
+  height: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+}
+.theme-preview-cta {
+  height: 7px;
+  width: 50%;
+  border-radius: 2px;
+}
+.theme-preview-label {
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+/* ── Presence dot (mini-profile) ───────────────────────────────────
+ * Rendered inside `.profile-avatar` when Team Mode → Show presence is
+ * on. Three colour states tied to the workspace poller's last-tick
+ * timestamp; tooltip shows the absolute "Synced 12s ago" read-out. */
+.profile-presence-dot {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid #0d1421;
+  pointer-events: none;
+  z-index: 2;
+}
+.profile-presence-dot.is-live  { background: var(--status-success, #34d399); animation: presence-pulse 2.4s ease-in-out infinite; }
+.profile-presence-dot.is-soon  { background: var(--status-warning, #f59e0b); }
+.profile-presence-dot.is-stale { background: rgba(148, 163, 184, 0.6); }
+@keyframes presence-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.35); }
+  50%      { box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
+}
+.profile-avatar { position: relative; }
+
+/* ── Conflict dialog ─────────────────────────────────────────────── */
+.conflict-backdrop { z-index: 1200 !important; }
+.conflict-dialog {
+  max-width: 720px !important;
+  width: 100% !important;
+  grid-template-columns: 1fr !important;
+}
+.conflict-head { display: flex; gap: 14px; margin-bottom: 22px; }
+.conflict-head h2 { margin: 0 0 4px; font-size: 18px; }
+.conflict-head p { margin: 0; color: #94a3b8; font-size: 13px; line-height: 1.4; }
+.conflict-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 720px) {
+  .conflict-grid { grid-template-columns: 1fr; }
+}
+.conflict-card {
+  text-align: left;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 18px;
+  cursor: pointer;
+  color: #f4f7fb;
+  transition: border-color 0.14s, background 0.14s, transform 0.14s;
+}
+.conflict-card:hover {
+  border-color: var(--accent-strong);
+  background: var(--accent-softer);
+}
+.conflict-card.is-recommended {
+  border-color: var(--accent-strong);
+}
+.conflict-card-icon {
+  width: 36px; height: 36px;
+  border-radius: 12px;
+  background: var(--accent-softer);
+  color: var(--accent);
+  display: inline-flex; align-items: center; justify-content: center;
+  margin-bottom: 12px;
+}
+.conflict-card h3 { margin: 0 0 4px; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+.conflict-rec {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+.conflict-card p { margin: 0 0 12px; color: #94a3b8; font-size: 12px; line-height: 1.45; }
+.conflict-card dl { margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.conflict-card dl div { display: flex; justify-content: space-between; font-size: 11px; }
+.conflict-card dl dt { color: #94a3b8; }
+.conflict-card dl dd { margin: 0; color: #f4f7fb; font-weight: 600; }
+.conflict-foot { margin-top: 18px; display: flex; justify-content: flex-end; }
+.profile-view-hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.profile-view-avatar {
+  width: 64px; height: 64px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px; font-weight: 800;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.profile-view-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.profile-view-hero-text { flex: 1; min-width: 0; }
+.profile-view-hero-text h2 { margin: 0 0 2px; font-size: 22px; }
+.profile-view-handle { margin: 0 0 8px; color: var(--accent); font-size: 13px; font-weight: 600; }
+.profile-view-bio { margin: 0; color: #cbd5e1; font-size: 13px; line-height: 1.55; }
+.profile-view-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.profile-view-meta-row {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c8d8e8;
+  padding: 4px 10px;
+  border-radius: 99px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.profile-view-meta-row.is-static { cursor: default; }
+.profile-view-meta-row:hover:not(.is-static) {
+  background: var(--accent-softer);
+  border-color: var(--accent-strong);
+}
+.profile-view-section { margin-top: 18px; }
+.profile-view-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.profile-view-chip {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c8d8e8;
+  font-size: 11px;
+}
+.profile-view-chip.is-primary {
+  background: var(--accent-softer);
+  border-color: var(--accent-strong);
+  color: #f4f7fb;
+  font-weight: 700;
+}
+.profile-view-chip.is-muted { color: #94a3b8; }
+.profile-view-social {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #c8d8e8;
+  font-size: 11px;
+  cursor: pointer;
+}
+.profile-view-social:hover:not(.is-static) {
+  background: var(--accent-softer);
+  border-color: var(--accent-strong);
+}
+.profile-view-social-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+  color: #94a3b8;
+  font-weight: 700;
+}
+.profile-view-social-value { font-weight: 600; }
+.profile-view-studio {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-top: 8px;
+}
+.profile-view-studio h3 { margin: 0 0 6px; font-size: 16px; font-weight: 700; }
+.profile-view-studio-meta {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  color: #94a3b8; font-size: 12px; margin-bottom: 8px;
+}
+.profile-view-studio-legal {
+  margin: 4px 0 8px; color: #94a3b8; font-size: 11.5px; font-style: italic;
+}
+.profile-view-brand-swatch {
+  width: 22px; height: 22px;
+  border-radius: 99px;
+  border: 2px solid rgba(255, 255, 255, 0.10);
 }
 

@@ -27,6 +27,7 @@ import {
   type Workspace,
 } from "../lib/workspaces";
 import { getWorkspacePath } from "../lib/storage";
+import { ProfileViewModal } from "./modals/ProfileViewModal";
 
 type NavItem = { key: WorkspaceTab; label: string; icon: typeof LayoutDashboard };
 type NavSection = { eyebrow: string; items: NavItem[] };
@@ -40,37 +41,34 @@ export function Sidebar({
   onOpenSettings: () => void;
   onNewWorkspace: () => void;
 }) {
-  const { workspaceTab, setWorkspaceTab, language, ui, avatarPath, showToast, showError } = useAppStore();
+  const { workspaceTab, setWorkspaceTab, language, ui, avatarPath, showToast, showError, profile, teamMode } = useAppStore();
   const t = ui as unknown as Record<string, string>;
   const avatarSrc = imgSrc(avatarPath);
 
-  // ── User identity (synced with localStorage from Profile) ───────────────
+  // v0.9 polish — Mini-profile pulls its name / sub-line directly
+  // from the live profile slice instead of the pre-v0.9
+  // localStorage keys. Display name falls back to a localised
+  // default; the sub-line prefers the user's bio (truncated to one
+  // line) and falls back to the localised primary-role label.
   const defaultName = language === "tr" ? "Stüdyo Üyesi" : "Studio Member";
-  const defaultRole = language === "tr" ? "Geliştirici" : "Developer";
-  const [userName, setUserName] = useState<string>(defaultName);
-  const [userRole, setUserRole] = useState<string>(defaultRole);
-  useEffect(() => {
-    const readIdentity = () => {
-      try {
-        const name = localStorage.getItem("heravex_user_name");
-        const role = localStorage.getItem("heravex_user_role");
-        setUserName((name && name.trim()) || defaultName);
-        setUserRole((role && role.trim()) || defaultRole);
-      } catch {
-        setUserName(defaultName);
-        setUserRole(defaultRole);
-      }
-    };
-    readIdentity();
-    // Update when other tabs (or future code paths) change storage
-    window.addEventListener("storage", readIdentity);
-    // Poll lightly so in-app edits in Profile.tsx surface here (no event bus)
-    const id = window.setInterval(readIdentity, 1200);
-    return () => {
-      window.removeEventListener("storage", readIdentity);
-      window.clearInterval(id);
-    };
-  }, [defaultName, defaultRole]);
+  const userName = profile.displayName.trim() || defaultName;
+  const roleKey =
+    profile.primaryRole === "soloDev"    ? "roleSoloDev" :
+    profile.primaryRole === "designer"   ? "roleDesigner" :
+    profile.primaryRole === "programmer" ? "roleProgrammer" :
+    profile.primaryRole === "artist"     ? "roleArtist" :
+    profile.primaryRole === "composer"   ? "roleComposer" :
+    profile.primaryRole === "producer"   ? "roleProducer" :
+    profile.primaryRole === "writer"     ? "roleWriter" :
+    profile.primaryRole === "qa"         ? "roleQa" : "roleOther";
+  const roleLabel = (ui as unknown as Record<string, string>)[roleKey] ?? "";
+  // Bio when present wins over role — that's the spec ("girilen bio
+  // sol altta açıklama yazısı olarak görünsün"). Truncate hard so
+  // the sidebar layout never grows past one line.
+  const bioOneLiner = profile.bio.trim().replace(/\s+/g, " ");
+  const userRole = bioOneLiner.length > 0
+    ? (bioOneLiner.length > 60 ? bioOneLiner.slice(0, 58) + "…" : bioOneLiner)
+    : roleLabel;
 
   const initials = userName
     .split(/\s+/)
@@ -78,6 +76,53 @@ export function Sidebar({
     .slice(0, 2)
     .map((s) => s[0]?.toUpperCase())
     .join("") || "HV";
+
+  // v0.9 polish — view-mode profile modal. Main mini-profile click
+  // opens this; the gear icon still routes to Settings.
+  const [showProfileView, setShowProfileView] = useState(false);
+
+  // Presence indicator (Team Mode only). Reads the last-sync-check
+  // timestamp the workspace poller persists on every tick and converts
+  // it into a 3-state dot: green (<2× watcher interval ago — healthy),
+  // amber (within 5×), grey (stale). Updates once per second so the
+  // colour tracks the actual freshness, not just the moment of opening.
+  const [presenceTick, setPresenceTick] = useState(0);
+  useEffect(() => {
+    if (!teamMode.showPresence) return;
+    const id = window.setInterval(() => setPresenceTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [teamMode.showPresence]);
+  const presenceState: "live" | "soon" | "stale" | null = (() => {
+    if (!teamMode.showPresence) return null;
+    void presenceTick; // re-evaluate on tick
+    const raw = localStorage.getItem("heravex_last_sync_check");
+    if (!raw) return "stale";
+    const ago = Date.now() - Number(raw);
+    const baseMs =
+      teamMode.watcherDelay === "instant" ? 3000 :
+      teamMode.watcherDelay === "5s"      ? 5000 :
+      teamMode.watcherDelay === "30s"     ? 30000 :
+      teamMode.watcherDelay === "2m"      ? 120000 : 5000;
+    if (ago < baseMs * 2) return "live";
+    if (ago < baseMs * 5) return "soon";
+    return "stale";
+  })();
+  const presenceLabel = (() => {
+    if (!presenceState) return "";
+    const raw = localStorage.getItem("heravex_last_sync_check");
+    const ago = raw ? Math.max(0, Math.floor((Date.now() - Number(raw)) / 1000)) : null;
+    const agoStr = ago == null
+      ? (language === "tr" ? "henüz yok" : "no data")
+      : ago < 60 ? `${ago}s`
+      : ago < 3600 ? `${Math.floor(ago / 60)}m`
+      : `${Math.floor(ago / 3600)}h`;
+    const map = {
+      live:  language === "tr" ? "Senkron canlı" : "Sync live",
+      soon:  language === "tr" ? "Yakında güncellenecek" : "Updating soon",
+      stale: language === "tr" ? "Senkron eski" : "Sync stale",
+    };
+    return `${map[presenceState]} · ${agoStr}`;
+  })();
 
   // ── Workspace dropdown ─────────────────────────────────────────────────
   const [wsOpen, setWsOpen] = useState(false);
@@ -284,7 +329,7 @@ export function Sidebar({
         <div className="profile-card">
           <button
             className="profile-card-main"
-            onClick={() => setWorkspaceTab("profile")}
+            onClick={() => setShowProfileView(true)}
             title={t.profile ?? "Profile"}
             data-tutorial="nav-profile"
           >
@@ -297,6 +342,13 @@ export function Sidebar({
                   alt={initials}
                   className="profile-avatar-img profile-avatar-mark"
                   draggable={false}
+                />
+              )}
+              {presenceState && (
+                <span
+                  className={`profile-presence-dot is-${presenceState}`}
+                  title={presenceLabel}
+                  aria-label={presenceLabel}
                 />
               )}
             </div>
@@ -328,6 +380,12 @@ export function Sidebar({
         </div>
       </div>
 
+      {showProfileView && (
+        <ProfileViewModal
+          onClose={() => setShowProfileView(false)}
+          onEdit={() => setWorkspaceTab("profile")}
+        />
+      )}
     </aside>
   );
 }

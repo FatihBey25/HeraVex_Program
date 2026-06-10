@@ -508,6 +508,10 @@ fn default_release_template() -> Vec<ReleaseTemplateItem> {
     ]
 }
 
+// Kept for test coverage of the legacy auto-apply mapping even though
+// v0.8.5 stopped seeding new games from the global template. Removing
+// the function would lose the regression test for the data shape.
+#[allow(dead_code)]
 fn timeline_from_template(template: &[ReleaseTemplateItem]) -> Vec<ReleaseTimelineItem> {
     template
         .iter()
@@ -588,6 +592,12 @@ struct NoteRecord {
     /// by a single store helper.
     #[serde(default)]
     moodboard_image_ids: Vec<String>,
+    /// User-controlled display order in the Studio sidebar. Set by the
+    /// `reorderNotes` store action when a note is dragged. Pre-v0.9
+    /// records load with `0`; ties break on `updatedAt` desc so the
+    /// list stays meaningful before the user has ever reordered.
+    #[serde(default)]
+    order: i32,
 }
 
 // ═══ Atomic per-id storage ═══════════════════════════════════════════════
@@ -1273,6 +1283,141 @@ fn save_release_template(
     Ok(settings.release_template)
 }
 
+/// Silent auto-backup written to `<AppData>/heravex/backups/`.
+///
+/// Differs from `export_backup` in two ways:
+///   1. No file dialog — the caller (frontend auto-scheduler) opens
+///      the app and we just persist a JSON next to the existing
+///      settings.json without bothering the user.
+///   2. Filenames are timestamped (`auto-YYYYMMDD-HHMM.json`) so the
+///      Backup history view can sort + prune them.
+///
+/// The folder is created on first call. Returns the absolute path so
+/// the frontend can show "saved to …" if anyone wants the read-out.
+/// Internal worker that does the actual backup work. Pulled out of
+/// the command so the async wrapper below can spawn it on a thread.
+///
+/// Output format is a ZIP archive containing:
+///   manifest.json  — `BackupSnapshotLite` (no embedded files)
+///   library/...    — raw files copied straight in (no base64)
+///
+/// The previous format wrapped every binary in base64 inside one huge
+/// JSON string. With screenshot-heavy workspaces (10 games × 5 PNGs)
+/// the resulting String + serde pretty-print easily peaked >1 GB of
+/// memory and crashed the WebView process. The ZIP path streams each
+/// file directly so peak memory stays in the tens of megabytes.
+fn perform_silent_backup(app: &AppHandle, prefix: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use zip::{write::SimpleFileOptions, ZipWriter};
+
+    let saves_dir = root_dir(app)?.join("Saves");
+    fs::create_dir_all(&saves_dir).map_err(|e| format!("Saves dir: {e}"))?;
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let final_path = saves_dir.join(format!("{}-{}.zip", prefix, stamp));
+    let part_path = saves_dir.join(format!("{}-{}.zip.part", prefix, stamp));
+
+    let games    = load_games_from_disk(app)?;
+    let notes    = load_notes_from_disk(app).unwrap_or_default();
+    let settings = load_settings_from_disk(app)?;
+
+    // Manifest carries everything except binary library content. The
+    // matching import command reconstructs the workspace by writing
+    // these blobs to disk and unzipping the `library/` entries.
+    let manifest = serde_json::json!({
+        "version": 2,
+        "exportedAt": now_iso(),
+        "settings": settings,
+        "games":    games,
+        "notes":    notes,
+    });
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+
+    let file = fs::File::create(&part_path).map_err(|e| format!("create zip: {e}"))?;
+    let mut zip = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(3)); // mild — keeps CPU low
+
+    zip.start_file("manifest.json", opts).map_err(|e| e.to_string())?;
+    zip.write_all(&manifest_bytes).map_err(|e| e.to_string())?;
+
+    // Walk library/ and copy files in. Skip nothing — the user expects
+    // their screenshots to come back when they restore.
+    let library = library_dir(app)?;
+    if library.exists() {
+        zip_walk(&mut zip, &library, &library, opts)?;
+    }
+
+    zip.finish().map_err(|e| e.to_string())?;
+
+    // Atomic rename so a kill mid-zip never leaves a half-written file
+    // showing up in the history list.
+    fs::rename(&part_path, &final_path).map_err(|err| err.to_string())?;
+
+    return Ok(final_path.to_string_lossy().to_string());
+
+    fn zip_walk(
+        zip: &mut zip::ZipWriter<fs::File>,
+        root: &Path,
+        current: &Path,
+        opts: SimpleFileOptions,
+    ) -> Result<(), String> {
+        use std::io::{Read, Write};
+        let entries = match fs::read_dir(current) {
+            Ok(e) => e,
+            Err(_) => return Ok(()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                zip_walk(zip, root, &path, opts)?;
+                continue;
+            }
+            let rel = match path.strip_prefix(root) {
+                Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            let entry_name = format!("library/{}", rel);
+            zip.start_file(&entry_name, opts).map_err(|e| e.to_string())?;
+            // 64 KB buffered copy — keeps memory flat on multi-MB
+            // screenshot folders.
+            let mut f = match fs::File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                zip.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Async-from-the-frontend silent backup. Runs the heavy IO on a
+/// worker thread so the webview's IPC handler returns immediately and
+/// the UI never freezes during a multi-megabyte serialisation. The
+/// return value is the resolved file path or an error string.
+#[tauri::command]
+async fn export_backup_silent(app: AppHandle, prefix: Option<String>) -> Result<String, String> {
+    let prefix = prefix.unwrap_or_else(|| "auto".into());
+    // `tauri::async_runtime::spawn_blocking` parks the work on Tauri's
+    // dedicated blocking pool — same one fs/sqlite use — so we don't
+    // starve the small UI command thread pool. The await is cheap; the
+    // frontend just sees a regular Promise that resolves when done.
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        perform_silent_backup(&app_clone, &prefix)
+    })
+    .await
+    .map_err(|e| format!("backup thread join failed: {e}"))?
+}
+
 #[tauri::command]
 fn export_backup(app: AppHandle) -> Result<String, String> {
     let save_path = FileDialog::new()
@@ -1308,47 +1453,131 @@ fn export_backup(app: AppHandle) -> Result<String, String> {
     Ok(save_path.to_string_lossy().to_string())
 }
 
+/// Restore a backup file. Accepts either the new v2 `.zip` format or
+/// the legacy v1 `.json` (base64-bundled) format. Behaviour:
+///   - When `path` is provided, that file is read directly (used by
+///     the BackupPage "Restore" button on history rows).
+///   - When `path` is empty/none, falls back to a file picker so old
+///     callers still work.
 #[tauri::command]
-fn import_backup(app: AppHandle) -> Result<String, String> {
-    let backup_path = FileDialog::new()
-        .set_title("Yedek dosyasini sec")
-        .add_filter("JSON", &["json"])
-        .pick_file()
-        .ok_or_else(|| "Ice aktarma iptal edildi.".to_string())?;
+fn import_backup(app: AppHandle, path: Option<String>) -> Result<String, String> {
+    let backup_path = match path.filter(|p| !p.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => FileDialog::new()
+            .set_title("Yedek dosyasini sec")
+            .add_filter("Backup", &["zip", "json"])
+            .pick_file()
+            .ok_or_else(|| "Ice aktarma iptal edildi.".to_string())?,
+    };
 
-    let raw = fs::read_to_string(&backup_path).map_err(|err| err.to_string())?;
-    let snapshot: BackupSnapshot = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    let is_zip = backup_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
 
-    if snapshot.version != 1 {
+    if is_zip {
+        import_backup_zip(&app, &backup_path)?;
+    } else {
+        import_backup_legacy_json(&app, &backup_path)?;
+    }
+    Ok(backup_path.to_string_lossy().to_string())
+}
+
+/// New ZIP restore path — streams entries straight to disk without
+/// holding the full archive in memory. Mirrors the layout produced by
+/// `perform_silent_backup`.
+fn import_backup_zip(app: &AppHandle, archive_path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let file = fs::File::open(archive_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    // 1. Parse manifest.json — must come first so we know the version.
+    let mut manifest_bytes = Vec::new();
+    {
+        let mut m = archive.by_name("manifest.json").map_err(|e| e.to_string())?;
+        m.read_to_end(&mut manifest_bytes).map_err(|e| e.to_string())?;
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).map_err(|e| e.to_string())?;
+    let version = manifest.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    if version != 2 {
         return Err("Bu yedek surumu desteklenmiyor.".into());
     }
 
-    let library = library_dir(&app)?;
+    // 2. Wipe library/ before restoring.
+    let library = library_dir(app)?;
     if library.exists() {
         fs::remove_dir_all(&library).map_err(|err| err.to_string())?;
     }
     fs::create_dir_all(&library).map_err(|err| err.to_string())?;
 
+    // 3. Stream every entry under library/ into the workspace.
+    let count = archive.len();
+    for i in 0..count {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().to_string();
+        if name == "manifest.json" { continue; }
+        let Some(rel) = name.strip_prefix("library/") else { continue; };
+        if rel.is_empty() { continue; }
+        // Path-traversal hardening — reject `..`, drive letters, etc.
+        let safe_rel = validate_relative_backup_path(rel)?;
+        let target = library.join(safe_rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        let mut out = fs::File::create(&target).map_err(|err| err.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|err| err.to_string())?;
+    }
+
+    // 4. Persist the games/notes/settings blobs from the manifest.
+    if let Some(games_val) = manifest.get("games") {
+        let games: Vec<GameRecord> = serde_json::from_value(games_val.clone())
+            .map_err(|e| e.to_string())?;
+        save_games_to_disk(app, &games)?;
+    }
+    if let Some(notes_val) = manifest.get("notes") {
+        let notes: Vec<NoteRecord> = serde_json::from_value(notes_val.clone())
+            .unwrap_or_default();
+        save_notes_to_disk(app, &notes)?;
+    }
+    if let Some(settings_val) = manifest.get("settings") {
+        let settings: AppSettings = serde_json::from_value(settings_val.clone())
+            .map_err(|e| e.to_string())?;
+        save_settings_to_disk(app, &settings)?;
+    }
+    Ok(())
+}
+
+/// Legacy v1 JSON restore — kept for users upgrading with old backups
+/// still on disk. The base64 path stays expensive in memory; we just
+/// don't recommend it for fresh backups any more.
+fn import_backup_legacy_json(app: &AppHandle, json_path: &Path) -> Result<(), String> {
+    let raw = fs::read_to_string(json_path).map_err(|err| err.to_string())?;
+    let snapshot: BackupSnapshot = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    if snapshot.version != 1 {
+        return Err("Bu yedek surumu desteklenmiyor.".into());
+    }
+    let library = library_dir(app)?;
+    if library.exists() {
+        fs::remove_dir_all(&library).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&library).map_err(|err| err.to_string())?;
     for file in snapshot.files {
         let relative_path = validate_relative_backup_path(&file.path)?;
         let target = library.join(relative_path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
-
         let bytes = general_purpose::STANDARD
             .decode(file.contents_base64)
             .map_err(|err| err.to_string())?;
         fs::write(target, bytes).map_err(|err| err.to_string())?;
     }
-
-    save_games_to_disk(&app, &snapshot.games)?;
-    // Restore studio-wide notes (NoteCenter). Older backups won't have any —
-    // the `#[serde(default)]` keeps this defensive.
-    save_notes_to_disk(&app, &snapshot.notes)?;
-    save_settings_to_disk(&app, &snapshot.settings)?;
-
-    Ok(backup_path.to_string_lossy().to_string())
+    save_games_to_disk(app, &snapshot.games)?;
+    save_notes_to_disk(app, &snapshot.notes)?;
+    save_settings_to_disk(app, &snapshot.settings)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -4304,6 +4533,233 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
     open::that(folder).map_err(|e| e.to_string())
 }
 
+// ── v0.9 M5: Storage stats + backup history ───────────────────────────
+//
+// `compute_storage_stats` walks the data root and reports total disk
+// use plus a breakdown by major subdirectory (games/notes/moodboard/
+// backups). The Settings → Storage page renders the result as a tiny
+// bar chart. Walking is depth-first with errors swallowed per-file —
+// a single unreadable entry shouldn't kill the whole report.
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageStats {
+    total_bytes: u64,
+    file_count: u64,
+    games_bytes: u64,
+    notes_bytes: u64,
+    moodboard_bytes: u64,
+    backups_bytes: u64,
+    other_bytes: u64,
+}
+
+fn dir_size_recursive(path: &PathBuf) -> (u64, u64) {
+    // (bytes, files) — silently skips unreadable entries.
+    let mut bytes: u64 = 0;
+    let mut files: u64 = 0;
+    let Ok(entries) = fs::read_dir(path) else { return (0, 0); };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_dir() {
+                let (b, f) = dir_size_recursive(&p);
+                bytes = bytes.saturating_add(b);
+                files = files.saturating_add(f);
+            } else {
+                bytes = bytes.saturating_add(meta.len());
+                files = files.saturating_add(1);
+            }
+        }
+    }
+    (bytes, files)
+}
+
+#[tauri::command]
+fn compute_storage_stats(app: AppHandle) -> Result<StorageStats, String> {
+    let root = data_root(&app)?;
+    let library = library_dir(&app)?;
+
+    let games_path    = root.join("games");
+    let notes_path    = root.join("notes");
+    let backups_path  = root.join("backups");
+    // Moodboard images live under `library/<gameId>/moodboard/` — we
+    // walk the library and sum any path whose final segment is
+    // `moodboard`. Per-game build files in library/<gameId>/v*/ count
+    // toward `games_bytes` so a heavy build sits in the right bucket.
+    let (games_bytes,    _gf) = dir_size_recursive(&games_path);
+    let (notes_bytes,    _nf) = dir_size_recursive(&notes_path);
+    let (backups_bytes,  _bf) = dir_size_recursive(&backups_path);
+    let (library_bytes,  library_files) = dir_size_recursive(&library);
+    // Approximate moodboard by walking library subtree looking for
+    // `moodboard` folders. Cheaper than tagging every file.
+    let mut moodboard_bytes: u64 = 0;
+    if let Ok(games) = fs::read_dir(&library) {
+        for game in games.flatten() {
+            let mb = game.path().join("moodboard");
+            if mb.is_dir() {
+                let (b, _) = dir_size_recursive(&mb);
+                moodboard_bytes = moodboard_bytes.saturating_add(b);
+            }
+        }
+    }
+    let games_disk = library_bytes.saturating_sub(moodboard_bytes);
+
+    let (root_bytes, root_files) = dir_size_recursive(&root);
+    let categorised = games_bytes
+        .saturating_add(notes_bytes)
+        .saturating_add(backups_bytes)
+        .saturating_add(library_bytes);
+    let other_bytes = root_bytes.saturating_sub(categorised);
+
+    Ok(StorageStats {
+        total_bytes: root_bytes,
+        file_count: root_files.saturating_add(library_files),
+        // Combined "games" bucket: per-id JSON records + their build
+        // archives, minus moodboard so the latter has its own slice.
+        games_bytes: games_bytes.saturating_add(games_disk),
+        notes_bytes,
+        moodboard_bytes,
+        backups_bytes,
+        other_bytes,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupEntry {
+    path: String,
+    name: String,
+    size_bytes: u64,
+    /// Modified time ISO-formatted; falls back to "" when the platform
+    /// doesn't expose it (unlikely on the desktop targets we ship).
+    created_at: String,
+    /// Heuristic — backups named with `auto-` prefix are recognised as
+    /// scheduler-driven; everything else is treated as manual.
+    is_auto: bool,
+}
+
+#[tauri::command]
+fn list_backups(app: AppHandle) -> Result<Vec<BackupEntry>, String> {
+    // Canonical folder is `Saves/`. Legacy `backups/` is still scanned
+    // so users upgrading from older v0.9 builds don't lose visibility
+    // on their existing dumps. Both folders are de-duped by full path.
+    let root = data_root(&app)?;
+    let candidates = [root.join("Saves"), root.join("backups")];
+    let mut out: Vec<BackupEntry> = Vec::new();
+    for folder in &candidates {
+        let Ok(entries) = fs::read_dir(folder) else { continue; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue; };
+            if !meta.is_file() { continue; }
+            let name = path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !(name.ends_with(".json") || name.ends_with(".zip") || name.ends_with(".bak")) {
+                continue;
+            }
+            let created_at = meta.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| {
+                    let secs = d.as_secs() as i64;
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            out.push(BackupEntry {
+                path: path.to_string_lossy().to_string(),
+                is_auto: name.starts_with("auto-"),
+                name,
+                size_bytes: meta.len(),
+                created_at,
+            });
+        }
+    }
+    // Newest first.
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
+/// Destructive nuclear option. Walks the data root and removes every
+/// subdirectory we created (games/, notes/, library/, backups/) plus
+/// the settings file. The frontend gates this behind a "type SIL to
+/// confirm" prompt; this command itself is unconditional, so don't
+/// expose it casually.
+#[tauri::command]
+fn delete_all_data(app: AppHandle) -> Result<(), String> {
+    let root = data_root(&app)?;
+    // Per-directory removal so an unrelated file users dropped in the
+    // root (e.g. an editor backup) doesn't get caught.
+    for sub in ["games", "notes", "library", "backups"] {
+        let p = root.join(sub);
+        if p.exists() {
+            fs::remove_dir_all(&p).map_err(|e| format!("{sub}: {e}"))?;
+        }
+    }
+    // settings.json + cached files
+    for name in ["settings.json", "games.legacy.json", "notes.legacy.json"] {
+        let p = root.join(name);
+        if p.exists() {
+            let _ = fs::remove_file(&p);
+        }
+    }
+    Ok(())
+}
+
+/// Small file IO bridges used by the export-redaction pass. We
+/// keep them constrained to UTF-8 text so binary backups never go
+/// through here, and we don't expose them on the CSP-restricted
+/// surface (no `fs` plugin pulled in).
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
+/// Opens the host's log directory in the OS file manager. Falls back
+/// to the app data root when the platform log dir is unavailable.
+#[tauri::command]
+fn open_log_directory(app: AppHandle) -> Result<(), String> {
+    let path = app.path()
+        .app_log_dir()
+        .ok()
+        .filter(|p| p.exists())
+        .or_else(|| data_root(&app).ok())
+        .ok_or_else(|| "Log dizini bulunamadi.".to_string())?;
+    open::that(path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_backup(app: AppHandle, path: String) -> Result<(), String> {
+    // Defence in depth — only allow deletes of files that genuinely
+    // live under one of our backup directories. Both `Saves/` (current)
+    // and `backups/` (legacy) are accepted so users upgrading from older
+    // builds can still prune their old files.
+    let root = data_root(&app)?;
+    let allowed = ["Saves", "backups"];
+    let target = PathBuf::from(&path);
+    let canonical_target = target.canonicalize().map_err(|e| e.to_string())?;
+    let mut ok = false;
+    for folder in &allowed {
+        let dir = root.join(folder);
+        if let Ok(canon) = dir.canonicalize() {
+            if canonical_target.starts_with(&canon) {
+                ok = true;
+                break;
+            }
+        }
+    }
+    if !ok {
+        return Err("Path is outside the backup directory.".to_string());
+    }
+    fs::remove_file(&canonical_target).map_err(|e| e.to_string())
+}
+
 /// Resolve a workspace-relative build path to the absolute folder that
 /// contains it. Used by the Butler panel on the Versions tab to pre-fill
 /// its "Local build folder" input when a user clicks "Push this version
@@ -4409,6 +4865,146 @@ fn export_csv_report(_app: AppHandle, csv_content: String) -> Result<String, Str
     Ok(save_path.to_string_lossy().to_string())
 }
 
+/// Plugin manifest discovery for the v0.9.x plugin/extension API.
+///
+/// Walks `<workspace>/plugins/<id>/heravex.plugin.json` and returns a
+/// JSON-encoded array of `{ manifest, entryUrl }` records. The JS
+/// loader (`src/lib/plugins.ts`) handles enabling/disabling and
+/// mounting; this side is intentionally dumb — it just enumerates.
+///
+/// Returns an empty array (never an error) when the plugins folder is
+/// missing. That keeps the API call cheap on every page mount even
+/// for users with no plugins installed.
+#[tauri::command]
+fn list_plugin_manifests(app: AppHandle) -> Result<String, String> {
+    let root = data_root(&app)?;
+    let plugins_dir = root.join("plugins");
+    if !plugins_dir.exists() || !plugins_dir.is_dir() {
+        return Ok(String::from("[]"));
+    }
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let entries = match fs::read_dir(&plugins_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(String::from("[]")),
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        let manifest_path = dir.join("heravex.plugin.json");
+        if !manifest_path.exists() { continue; }
+        let raw = match fs::read_to_string(&manifest_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let manifest: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Default entry filename if the manifest omits it.
+        let entry_name = manifest.get("entry")
+            .and_then(|v| v.as_str())
+            .unwrap_or("widget.js");
+        let entry_url = format!(
+            "file://{}",
+            dir.join(entry_name).to_string_lossy().replace('\\', "/"),
+        );
+        out.push(serde_json::json!({
+            "manifest": manifest,
+            "entryUrl": entry_url,
+        }));
+    }
+    serde_json::to_string(&out).map_err(|e| e.to_string())
+}
+
+/// Lightweight fingerprint of the active workspace data root. Used by
+/// the frontend Team-Mode polling loop to detect changes on cloud-sync
+/// drives (Drive, OneDrive, Dropbox) where the OS filesystem notifier
+/// is unreliable. Walks games.json, notes.json, activity.json, and the
+/// library/ subtree non-recursively at the game-folder level — enough
+/// to catch new games and edits without blowing CPU.
+#[tauri::command]
+fn compute_workspace_signature(app: AppHandle) -> Result<String, String> {
+    let root = data_root(&app)?;
+    if !root.exists() {
+        return Ok(String::from("0:0:0:0"));
+    }
+
+    // Stat-tree fingerprint:
+    //   file_count : total_size : max_mtime : name_hash
+    //
+    // `name_hash` is an additive hash of every file path's tail (relative
+    // to root). Catches cloud-sync edge cases where the file count/size
+    // stay identical but a file was renamed or replaced — Drive's
+    // placeholder files frequently land with mtime=0 and size=0, so the
+    // original 3-tuple couldn't distinguish "two empty placeholders for
+    // different games" from "no change at all". Including the name hash
+    // makes a brand-new game folder always change the signature.
+    //
+    // Also reads up to the first 256 bytes of games.json / notes.json
+    // (the two most-edited files) into a rolling FNV-1a hash so an edit
+    // that doesn't touch mtime — common on copy-over cloud writes — is
+    // still caught.
+    fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+        let mut h = seed;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    fn visit(dir: &PathBuf, root: &PathBuf, depth: u32, max_depth: u32,
+            count: &mut u64, size: &mut u64, mtime: &mut u64,
+            name_hash: &mut u64, content_hash: &mut u64) {
+        if depth > max_depth { return; }
+        let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let md = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+            if md.is_dir() {
+                visit(&p, root, depth + 1, max_depth, count, size, mtime, name_hash, content_hash);
+            } else {
+                *count += 1;
+                *size = size.saturating_add(md.len());
+                if let Ok(modified) = md.modified() {
+                    if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        let secs = d.as_secs();
+                        if secs > *mtime { *mtime = secs; }
+                    }
+                }
+                // Name hash — relative path bytes folded in. Path
+                // separators are normalised so a Win/Unix swap doesn't
+                // flap the signature.
+                if let Ok(rel) = p.strip_prefix(root) {
+                    let s = rel.to_string_lossy().replace('\\', "/");
+                    *name_hash = fnv1a(*name_hash, s.as_bytes());
+                }
+                // Content peek for the two hot-edit files. Cheap: bounded
+                // to 256 bytes so even on huge JSONs we stay sub-ms.
+                let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if fname == "games.json" || fname == "notes.json" || fname == "activity.json" {
+                    if let Ok(buf) = fs::read(&p) {
+                        let head = &buf[..buf.len().min(256)];
+                        *content_hash = fnv1a(*content_hash, head);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut file_count: u64 = 0;
+    let mut total_size: u64 = 0;
+    let mut max_mtime: u64 = 0;
+    let mut name_hash: u64 = 0xcbf29ce484222325;
+    let mut content_hash: u64 = 0xcbf29ce484222325;
+    visit(&root, &root, 0, 3,
+        &mut file_count, &mut total_size, &mut max_mtime,
+        &mut name_hash, &mut content_hash);
+
+    Ok(format!("{}:{}:{}:{:016x}:{:016x}",
+        file_count, total_size, max_mtime, name_hash, content_hash))
+}
+
 fn start_workspace_watcher(app: AppHandle) {
     use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
     use std::sync::mpsc::channel;
@@ -4511,6 +5107,13 @@ fn main() {
             reveal_in_folder,
             reveal_build_file,
             resolve_build_folder,
+            compute_storage_stats,
+            list_backups,
+            delete_backup,
+            delete_all_data,
+            open_log_directory,
+            read_text_file,
+            write_text_file,
             open_external,
             export_notes_pdf,
             get_all_notes,
@@ -4532,7 +5135,10 @@ fn main() {
             get_workspace_path,
             set_workspace_path,
             clear_workspace_path,
-            read_activity_log
+            read_activity_log,
+            compute_workspace_signature,
+            list_plugin_manifests,
+            export_backup_silent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

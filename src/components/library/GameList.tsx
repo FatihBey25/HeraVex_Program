@@ -7,6 +7,7 @@ import { statusLabel, statusToneClass } from "../../lib/i18n";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { imgSrc } from "../../lib/images";
 import { isGeneralGame } from "../../lib/general-game";
+import { useListKeyNav } from "../../lib/useListKeyNav";
 
 // ── Tag categorisation ────────────────────────────────────────────────────────
 // Categorises a tag based on keyword matching (TR + EN). Returns a CSS modifier.
@@ -69,6 +70,19 @@ export function GameList({ onCreateGame }: { onCreateGame: () => void }) {
         .includes(q);
     });
   }, [userGames, searchQuery, projectFilter]);
+
+  // j/k vim-style navigation across the filtered game list. Enter
+  // opens the detail panel (same as click), x prompts the existing
+  // delete confirm dialog.
+  useListKeyNav({
+    ids: filteredGames.map((g) => g.id),
+    currentId: selectedId || null,
+    setCurrentId: setSelectedId,
+    onDelete: (id) => {
+      const g = filteredGames.find((x) => x.id === id);
+      if (g) setConfirmDelete({ id: g.id, title: g.title });
+    },
+  });
 
   const activeProjects = userGames.filter((g) =>
     ["Fikir", "Prototip", "Demo", "Alpha", "Beta"].includes(g.status)

@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import { mountPluginWidgets, unmountPluginWidgets } from "../lib/plugins";
 import { motion } from "framer-motion";
 import {
   Gamepad2, ListTodo, CheckCircle2,
@@ -53,8 +54,12 @@ function progressColor(pct: number): string {
 export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
   const {
     games: allGames, globalExpenses, exchangeRates, language,
-    toggleTask, setWorkspaceTab, setActiveTaskId, setSelectedId, ui,
+    toggleTask, setWorkspaceTab, setActiveTaskId, setSelectedId, ui, layout,
   } = useAppStore();
+  // User can hide individual dashboard panels via Settings → Layout.
+  // Defaults are all-on so users who never visit the toggle don't lose
+  // any cards on upgrade.
+  const widgets = layout.dashboardWidgets ?? { overview: true, projects: true, tasks: true };
 
   // Hide the internal marker game from every list/metric on the dashboard;
   // its tasks still feed `allTasks` below so general tasks remain visible.
@@ -171,6 +176,7 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
       <div className="dashboard-grid">
 
         {/* ── LEFT: Overview metrics + chart ──────────────────────────────────── */}
+        {widgets.overview && (
         <section className="panel overview-card">
           <div className="dashboard-stats">
             <MetricCard
@@ -261,8 +267,10 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
             )}
           </div>
         </section>
+        )}
 
         {/* ── MIDDLE: Recent projects with progress bars ───────────────────────── */}
+        {widgets.projects && (
         <section className="panel dashboard-list">
           <div className="panel-head">
             <div>
@@ -318,8 +326,10 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
             )}
           </div>
         </section>
+        )}
 
         {/* ── RIGHT: Priority tasks with quick-complete checkbox ──────────────── */}
+        {widgets.tasks && (
         <section className="panel dashboard-list">
           <div className="panel-head">
             <div>
@@ -360,7 +370,13 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
             )}
           </div>
         </section>
+        )}
       </div>
+
+      {/* Plugin widget slot — third-party widgets render here. The
+          plugin runtime mounts/unmounts on every page swap so a broken
+          extension can never crash the dashboard. */}
+      <PluginSlot slot="dashboard" allGames={allGames} />
 
       {/* ── BOTTOM: Quick Actions ─────────────────────────────────────────────── */}
       <QuickActions
@@ -395,6 +411,37 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
       />
     </div>
   );
+}
+
+/** Mount point for third-party plugin widgets. Re-runs the plugin
+ *  discovery whenever the user toggles a plugin from Settings (via the
+ *  `heravex:plugins-changed` event). */
+function PluginSlot({ slot, allGames }: { slot: "dashboard"; allGames: ReturnType<typeof useAppStore.getState>["games"] }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { showToast } = useAppStore.getState();
+  useEffect(() => {
+    let active = true;
+    const ctx = {
+      apiVersion: 1 as const,
+      games: allGames.map((g) => ({ id: g.id, title: g.title, status: g.status })),
+      toast: (m: string, k?: "info" | "success" | "error") => showToast(m, k ?? "info"),
+      emit: (n: string, d?: unknown) => window.dispatchEvent(new CustomEvent(n, { detail: d })),
+    };
+    const mount = async () => {
+      if (!containerRef.current || !active) return;
+      await mountPluginWidgets(slot, containerRef.current, ctx);
+    };
+    void mount();
+    const onChange = () => void mount();
+    window.addEventListener("heravex:plugins-changed", onChange);
+    return () => {
+      active = false;
+      window.removeEventListener("heravex:plugins-changed", onChange);
+      void unmountPluginWidgets(slot);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slot]);
+  return <div ref={containerRef} className="heravex-plugin-slot" data-slot={slot} />;
 }
 
 // ── Quick Actions ─────────────────────────────────────────────────────────────

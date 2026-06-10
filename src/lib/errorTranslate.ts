@@ -362,6 +362,44 @@ const RULES: Rule[] = [
       es: "No se pudo leer el nombre del archivo.",
     },
   },
+
+  // ── Backup / restore ───────────────────────────────────────────────
+  {
+    match: /Path is outside the backup directory/i,
+    messages: {
+      tr: "Bu dosya yedek klasörünün dışında, silinemiyor.",
+      en: "That file is outside the backup folder.",
+      fr: "Ce fichier est hors du dossier de sauvegarde.",
+      es: "Ese archivo está fuera de la carpeta de copias.",
+    },
+  },
+  {
+    match: /Bu yedek surumu desteklenmiyor/i,
+    messages: {
+      tr: "Bu yedek sürümü desteklenmiyor (lütfen yeni bir yedek alın).",
+      en: "Unsupported backup version (please take a fresh backup).",
+      fr: "Version de sauvegarde non prise en charge.",
+      es: "Versión de copia no compatible.",
+    },
+  },
+  {
+    match: /backup thread join failed/i,
+    messages: {
+      tr: "Yedek işlemi yarıda kesildi. Tekrar deneyin.",
+      en: "Backup interrupted. Please retry.",
+      fr: "Sauvegarde interrompue. Réessayez.",
+      es: "Copia interrumpida. Inténtelo de nuevo.",
+    },
+  },
+  {
+    match: /Saves dir/i,
+    messages: {
+      tr: "Yedek klasörü oluşturulamadı (yazma izni kontrol edin).",
+      en: "Could not create Saves folder (check write permissions).",
+      fr: "Impossible de créer le dossier Saves.",
+      es: "No se pudo crear la carpeta Saves.",
+    },
+  },
 ];
 
 function applyParams(template: string, match: RegExpMatchArray): string {

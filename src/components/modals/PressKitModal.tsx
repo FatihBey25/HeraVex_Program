@@ -1,6 +1,6 @@
 ﻿import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Megaphone, FolderOpen, X, Plus, Trash2, Loader2 } from "lucide-react";
+import { Megaphone, FolderOpen, X, Plus, Trash2, Loader2, Eye } from "lucide-react";
 import { useAppStore } from "../../store";
 import { generatePressKit, pickDirectory, revealInFolder } from "../../lib/storage";
 import type { GameRecord, PressKitInput, PressKitTemplateId, CustomLink } from "../../types";
@@ -70,6 +70,66 @@ export function PressKitModal({
 
   const [input, setInput] = useState<PressKitInput>(defaultInput);
   const [busy, setBusy] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  // Build a lightweight HTML preview so the user sees their copy laid
+  // out before committing to file generation. We deliberately keep the
+  // markup small and template-aware — not a 1:1 of the Rust generator
+  // (that one ships screenshots, factsheet tables, etc.) — but enough
+  // to confirm tone, ordering, hero look. Sanitised via simple HTML
+  // escaping because the iframe sandboxes anyway.
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const previewHtml = useMemo(() => {
+    const isMinimal  = input.templateId === "minimal";
+    const isIndie    = input.templateId === "indie";
+    const isFactsht  = input.templateId === "factsheet";
+    const bg = input.darkMode ? "#0d1421" : "#fff";
+    const fg = input.darkMode ? "#f4f7fb" : "#1a1f2e";
+    const muted = input.darkMode ? "#94a3b8" : "#64748b";
+    const accent = isIndie ? "linear-gradient(135deg, #a78bfa, #4f8cff)" : "#4f8cff";
+    return `<!doctype html><html><head><meta charset="utf-8"><style>
+      body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; background: ${bg}; color: ${fg}; margin: 0; padding: 24px; }
+      .hero { padding: ${isIndie ? "32px 24px" : "20px 0"}; ${isIndie ? `background: ${accent}; color: #fff; border-radius: 12px;` : ""} }
+      .hero h1 { margin: 0 0 6px; font-size: ${isIndie ? "32px" : "26px"}; font-weight: 800; }
+      .hero p  { margin: 0; opacity: 0.85; }
+      .grid { display: grid; grid-template-columns: ${isMinimal ? "1fr" : "2fr 1fr"}; gap: 24px; margin-top: 20px; }
+      h2 { font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; color: ${muted}; margin: 16px 0 8px; }
+      .feat-list, .lang-list { margin: 0; padding-left: 18px; }
+      .factsheet { background: ${input.darkMode ? "rgba(255,255,255,0.04)" : "#f1f5f9"}; padding: 14px 16px; border-radius: 10px; }
+      .factsheet dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; }
+      .factsheet dt { color: ${muted}; }
+      .footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid ${input.darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}; color: ${muted}; font-size: 11px; }
+    </style></head><body>
+      ${isFactsht ? `<div class="factsheet"><dl>
+        <dt>Developer</dt><dd>${escapeHtml(input.developer)}</dd>
+        <dt>Release</dt><dd>${escapeHtml(input.releaseDate)}</dd>
+        <dt>Pricing</dt><dd>${escapeHtml(input.pricing || "—")}</dd>
+        <dt>Website</dt><dd>${escapeHtml(input.website || "—")}</dd>
+        <dt>Press</dt><dd>${escapeHtml(input.pressContact || "—")}</dd>
+        <dt>Languages</dt><dd>${escapeHtml(input.languages || "—")}</dd>
+      </dl></div>` : ""}
+      <header class="hero">
+        <h1>${escapeHtml(game.title)}</h1>
+        <p>${escapeHtml(input.description.slice(0, 200))}</p>
+      </header>
+      <div class="grid">
+        <main>
+          ${input.features.length ? `<h2>Key Features</h2><ul class="feat-list">${input.features.filter(f=>f.trim()).map(f=>`<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
+          ${input.history ? `<h2>History</h2><p>${escapeHtml(input.history).replace(/\n/g, "<br>")}</p>` : ""}
+        </main>
+        ${!isMinimal && !isFactsht ? `<aside class="factsheet"><h2 style="margin-top:0">Factsheet</h2><dl>
+          <dt>Developer</dt><dd>${escapeHtml(input.developer)}</dd>
+          <dt>Release</dt><dd>${escapeHtml(input.releaseDate)}</dd>
+          <dt>Pricing</dt><dd>${escapeHtml(input.pricing || "—")}</dd>
+          <dt>Languages</dt><dd>${escapeHtml(input.languages || "—")}</dd>
+        </dl></aside>` : ""}
+      </div>
+      <footer class="footer">
+        ${input.socialLinks.filter(s=>s.label.trim() || s.url.trim()).map(s => `<a style="color:${muted};margin-right:8px;text-decoration:none" href="${escapeHtml(s.url)}">${escapeHtml(s.label || s.url)}</a>`).join("")}
+      </footer>
+    </body></html>`;
+  }, [input, game.title]);
 
   const patch = (p: Partial<PressKitInput>) => setInput((prev) => ({ ...prev, ...p }));
 
@@ -324,9 +384,36 @@ export function PressKitModal({
           </fieldset>
         </div>
 
+        {showPreview && (
+          <div className="press-kit-preview-pane">
+            <div className="press-kit-preview-head">
+              <Eye size={13} />
+              <span>{tr("Live preview", "Canlı önizleme")}</span>
+              <small>{tr("Approximate — final file ships with screenshots.", "Yaklaşık — son dosya ekran görüntüleriyle gelir.")}</small>
+            </div>
+            <iframe
+              className="press-kit-preview-frame"
+              srcDoc={previewHtml}
+              title={tr("Preview", "Önizleme")}
+              sandbox=""
+            />
+          </div>
+        )}
+
         <footer className="press-kit-actions">
           <button type="button" className="secondary-button" onClick={onClose} disabled={busy}>
             {tr("Cancel", "İptal")}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setShowPreview((v) => !v)}
+            disabled={busy}
+          >
+            <Eye size={14} style={{ marginRight: 6 }} />
+            {showPreview
+              ? tr("Hide preview", "Önizlemeyi kapat")
+              : tr("Show preview", "Önizlemeyi göster")}
           </button>
           <button
             type="button"

@@ -1,4 +1,6 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+// v0.9 M8 — route invoke through the wrapper for log-on-call support.
+import { invoke } from "./invokeWrapper";
 
 /**
  * Upload a base64 data-URL to the Rust backend, which decodes and saves it

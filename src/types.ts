@@ -28,6 +28,10 @@ export type NoteRecord = {
    *  `MoodboardItem.linkedNoteIds`. Mutated only via the link helper
    *  in the store. */
   moodboardImageIds?: string[];
+  /** User-controlled position in the Studio notes sidebar. Lower
+   *  values render first; ties break on `updatedAt` desc. New notes
+   *  get `0` and float to the top until the user drags them. v0.9+. */
+  order?: number;
 };
 
 export type PressKitTemplateId = "classic" | "minimal" | "factsheet" | "indie";
