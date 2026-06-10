@@ -6,7 +6,7 @@
 // the in-app label, the installer filename, and `Get-Item *.exe | Version`
 // all agree.
 
-export const APP_VERSION = "0.9.5";
+export const APP_VERSION = "0.9.6";
 export const APP_BUILD_DATE = "10.06.2026";
 
 /** GitHub Releases page where each tagged build is published. Update this when

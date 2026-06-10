@@ -6,8 +6,8 @@ import {
   Zap, StickyNote, Wallet as WalletIcon, ChevronRight,
 } from "lucide-react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip,
-  ResponsiveContainer, Cell,
+  PieChart, Pie, Tooltip as RechartsTooltip,
+  ResponsiveContainer, Cell, Legend,
 } from "recharts";
 import { useAppStore, selectAllTasks } from "../store";
 import { calculateAccumulatedAmount } from "./PieChartWidget";
@@ -133,7 +133,6 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
   }, [games, globalExpenses, exchangeRates, language]);
 
   const barTotal = useMemo(() => barData.reduce((s, d) => s + d.amount, 0), [barData]);
-  const barSize = Math.max(16, Math.min(52, Math.floor(240 / Math.max(barData.length, 1))));
 
   // ── Data slices ─────────────────────────────────────────────────────────────
   const recentGames = useMemo(
@@ -208,17 +207,24 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
             {barData.length > 0 ? (
               <div style={{ height: 280 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={barData} barSize={barSize} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
-                    <XAxis
-                      dataKey="name"
-                      stroke="rgba(255,255,255,0.25)"
-                      fontSize={11}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis hide />
+                  <PieChart>
+                    <Pie
+                      data={barData}
+                      dataKey="amount"
+                      nameKey="fullName"
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={56}
+                      outerRadius={92}
+                      paddingAngle={2}
+                      stroke="rgba(15, 22, 36, 0.6)"
+                      strokeWidth={2}
+                    >
+                      {barData.map((_, i) => (
+                        <Cell key={i} fill={BAR_PALETTE[i % BAR_PALETTE.length]} fillOpacity={0.92} />
+                      ))}
+                    </Pie>
                     <RechartsTooltip
-                      cursor={{ fill: "rgba(255,255,255,0.04)" }}
                       contentStyle={{
                         backgroundColor: "#1e293b",
                         color: "#f8fafc",
@@ -229,25 +235,26 @@ export function Dashboard({ onCreateGame }: { onCreateGame: () => void }) {
                       }}
                       itemStyle={{ color: "#cbd5e1" }}
                       labelStyle={{ color: "#f8fafc", fontWeight: 700, marginBottom: 4 }}
-                      labelFormatter={(_label, payload) => {
-                        const item = payload?.[0]?.payload as { fullName?: string } | undefined;
-                        return item?.fullName ?? _label;
-                      }}
-                      formatter={(val: unknown) => {
+                      formatter={(val, _name, item) => {
                         const amount = Number(val);
                         const pct = barTotal > 0 ? ((amount / barTotal) * 100).toFixed(1) : "0.0";
+                        const label = (item?.payload as { fullName?: string } | undefined)?.fullName
+                          ?? String(_name ?? "");
                         return [
                           `$${amount.toFixed(2)}  (${pct}%)`,
-                          language === "tr" ? "Harcama" : "Spent",
+                          label,
                         ];
                       }}
                     />
-                    <Bar dataKey="amount" radius={[6, 6, 0, 0]}>
-                      {barData.map((_, i) => (
-                        <Cell key={i} fill={BAR_PALETTE[i % BAR_PALETTE.length]} fillOpacity={0.88} />
-                      ))}
-                    </Bar>
-                  </BarChart>
+                    <Legend
+                      verticalAlign="bottom"
+                      align="center"
+                      iconType="circle"
+                      formatter={(value) => (
+                        <span style={{ color: "#cbd5e1", fontSize: 11 }}>{value}</span>
+                      )}
+                    />
+                  </PieChart>
                 </ResponsiveContainer>
               </div>
             ) : (

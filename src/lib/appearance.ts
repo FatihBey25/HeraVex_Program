@@ -191,6 +191,10 @@ export interface LayoutSlice {
    *  shows through. Useful when paired with a vivid bg theme so the
    *  content reads as floating type/icons rather than card stacks. */
   transparentPanels: boolean;
+
+  /** Show the framer-motion sliding pill behind the active sidebar
+   *  item. When false the active state is a plain background swap. */
+  sidebarSlideIndicator: boolean;
 }
 
 export const DEFAULT_LAYOUT: LayoutSlice = {
@@ -212,6 +216,7 @@ export const DEFAULT_LAYOUT: LayoutSlice = {
   focusRing: true,
   dashboardWidgets: { overview: true, projects: true, tasks: true },
   transparentPanels: false,
+  sidebarSlideIndicator: true,
 };
 
 const DENSITY_SCALE: Record<DensityMode, number> = {

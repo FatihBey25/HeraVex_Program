@@ -416,16 +416,12 @@
   animation: none !important;
   transition: none !important;
 }
-/* Animation speed enforcement — every element on the page that has
-   a transition or animation gets its duration overridden to the
-   `--anim-duration` token. Component-level CSS still controls *what*
-   transitions, but *how fast* now follows the Layout setting.
-   Selector specificity is 0 so component rules win — only the
-   duration property is forced. */
-:root.anim-speed-managed * {
-  transition-duration: var(--anim-duration, 0.18s) !important;
-  animation-duration: var(--anim-duration, 0.18s) !important;
-}
+/* Animation speed token — components that opt in by referencing
+   `var(--anim-duration)` will scale with the user's setting. We
+   deliberately do NOT force this on `*` any more — that broke
+   framer-motion's `layoutId` spring (the sliding active indicator
+   in the sidebar), because forcing `transition-duration` with
+   `!important` overrode framer's inline spring timing. */
 
 /* "Instant" animation speed — globally suppress every transition and
    animation. Catches inline framer-motion styles too via *, ::before,
@@ -4410,9 +4406,11 @@ label span {
   color: #bfd3ff;
 }
 
-/* Tighten left column for the new sidebar */
+/* Tighten left column for the new sidebar — but honour the Layout
+   setting `--sidebar-width` so the user's slider actually moves the
+   column. Falls back to 248px when the var is unset. */
 .shell {
-  grid-template-columns: 248px 1fr;
+  grid-template-columns: var(--sidebar-width, 248px) 1fr;
 }
 
 @media (max-width: 1220px) {
@@ -12694,8 +12692,14 @@ select.input option {
 /* ── Sidebar group headers off — for sidebar collapse toggle ─────── */
 :root.sidebar-group-headers-off .sidebar-section-title,
 :root.sidebar-group-headers-off .sidebar-group-label,
-:root.sidebar-group-headers-off .nav-section-label {
-  display: none;
+:root.sidebar-group-headers-off .nav-section-label,
+:root.sidebar-group-headers-off .nav-section-eyebrow {
+  display: none !important;
+}
+/* When headers are off, collapse the section spacing too so the nav
+   doesn't look like it's missing rows. */
+:root.sidebar-group-headers-off .modern-nav .nav-section {
+  gap: 2px;
 }
 
 /* ── ProfileView modal — viewport-centered panel ───────────────────

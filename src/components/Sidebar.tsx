@@ -41,7 +41,7 @@ export function Sidebar({
   onOpenSettings: () => void;
   onNewWorkspace: () => void;
 }) {
-  const { workspaceTab, setWorkspaceTab, language, ui, avatarPath, showToast, showError, profile, teamMode } = useAppStore();
+  const { workspaceTab, setWorkspaceTab, language, ui, avatarPath, showToast, showError, profile, teamMode, layout } = useAppStore();
   const t = ui as unknown as Record<string, string>;
   const avatarSrc = imgSrc(avatarPath);
 
@@ -305,12 +305,15 @@ export function Sidebar({
                       onClick={() => setWorkspaceTab(item.key)}
                       data-tutorial={`nav-${item.key}`}
                     >
-                      {active && (
+                      {active && layout.sidebarSlideIndicator !== false && (
                         <motion.span
                           layoutId="nav-active-indicator"
                           className="nav-active-indicator"
                           transition={{ type: "spring", stiffness: 380, damping: 32 }}
                         />
+                      )}
+                      {active && layout.sidebarSlideIndicator === false && (
+                        <span className="nav-active-indicator nav-active-indicator-static" />
                       )}
                       <Icon size={18} strokeWidth={1.9} className="nav-item-icon" />
                       <span className="nav-item-label">{item.label}</span>

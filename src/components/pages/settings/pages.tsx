@@ -971,6 +971,18 @@ function LayoutPage() {
           }
         />
         <SettingRow
+          title={language === "tr" ? "Etkin sekme kayan göstergesi" : "Sliding active indicator"}
+          description={language === "tr"
+            ? "Seçili menü ögesinin yanındaki şeridi smooth animasyonla taşır."
+            : "Smoothly slides the bar next to the selected nav item."}
+          control={
+            <Toggle
+              checked={l.sidebarSlideIndicator !== false}
+              onChange={(v) => setLayout({ sidebarSlideIndicator: v })}
+            />
+          }
+        />
+        <SettingRow
           title={ui.layoutSidebarCollapseHover}
           badge="v1.0"
           disabled
