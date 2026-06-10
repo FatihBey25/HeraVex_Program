@@ -1,10 +1,11 @@
-name: "Build Linux"
+name: "Build HeraVex (Linux & Mac)"
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-linux:
+    name: Build for Linux
     permissions:
       contents: write
     runs-on: ubuntu-22.04
@@ -27,12 +28,43 @@ jobs:
       - name: Frontend Paketlerini Yükle
         run: npm install
 
-      - name: Tauri Build & Release
+      - name: Tauri Build & Release (Linux)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.8.5-linux
-          releaseName: "HeraVex v0.8.5 (Linux)"
+          tagName: v0.9.5-linux
+          releaseName: "HeraVex v0.9.5 (Linux)"
+          releaseDraft: true
+          prerelease: false   
+
+  build-mac:
+    name: Build for macOS
+    permissions:
+      contents: write
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node.js Kurulumu
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust Kurulumu
+        uses: dtolnay/rust-toolchain@stable
+
+      # Not: Mac için 'apt-get' veya ekstra kütüphane kurulumuna gerek yoktur!
+
+      - name: Frontend Paketlerini Yükle
+        run: npm install
+
+      - name: Tauri Build & Release (Mac)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v0.9.5-mac
+          releaseName: "HeraVex v0.9.5 (Mac)"
           releaseDraft: true
           prerelease: false
