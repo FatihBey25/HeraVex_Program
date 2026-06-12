@@ -99,10 +99,20 @@ export function NotesTab({ gameId }: { gameId: string }) {
   };
 
   const exportPdf = async () => {
+    // v0.9.7 PDF rewrite — browser-print path. See
+    // `lib/notePdfExport.ts` for the full rationale; the short version
+    // is the old Rust printpdf path couldn't render UTF-8 and didn't
+    // understand the editor's HTML output.
     try {
       if (draft !== game.notes) await persist(draft);
-      const path = await exportNotesPdf(game.id);
-      showToast(tr(`GDD exported to ${path}`, `GDD dışa aktarıldı: ${path}`), "success");
+      const { exportNoteAsPdf } = await import("../../../lib/notePdfExport");
+      await exportNoteAsPdf(draft || "", {
+        title: game.title,
+        subtitle: `${tr("Status", "Durum")}: ${game.status}`,
+        eyebrow: tr("HERAVEX · GAME DESIGN DOCUMENT", "HERAVEX · GAME DESIGN DOCUMENT"),
+        meta: (game.platforms || []).join(" · ") || tr("No platforms set", "Platform yok"),
+      }, language);
+      showToast(tr("Print dialog opened — choose Save as PDF.", "Yazdırma penceresi açıldı — PDF olarak kaydet seç."), "success");
     } catch (err) {
       const msg = String(err);
       if (!msg.includes("iptal")) showError(err);
@@ -131,6 +141,7 @@ export function NotesTab({ gameId }: { gameId: string }) {
         saveStatus={saveStatus}
         templates={templates}
         onExportPdf={exportPdf}
+        customTemplateScope={`game-${game.id}`}
       />
     </div>
   );

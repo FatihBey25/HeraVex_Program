@@ -1,4 +1,4 @@
-import{c as n}from"./index-B3YtnRqm.js";/**
+import{c as n}from"./index-BNduK9qY.js";/**
  * @license lucide-react v1.7.0 - ISC
  *
  * This source code is licensed under the ISC license.
@@ -8,9 +8,4 @@ import{c as n}from"./index-B3YtnRqm.js";/**
  *
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
- */const t=[["path",{d:"M16 17h6v-6",key:"t6n2it"}],["path",{d:"m22 17-8.5-8.5-5 5L2 7",key:"x473p"}]],c=n("trending-down",t);/**
- * @license lucide-react v1.7.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const d=[["path",{d:"M16 7h6v6",key:"box55l"}],["path",{d:"m22 7-8.5 8.5-5-5L2 17",key:"1t1m79"}]],p=n("trending-up",d);export{a as D,c as T,p as a};
+ */const t=[["path",{d:"M16 17h6v-6",key:"t6n2it"}],["path",{d:"m22 17-8.5-8.5-5 5L2 7",key:"x473p"}]],e=n("trending-down",t);export{a as D,e as T};

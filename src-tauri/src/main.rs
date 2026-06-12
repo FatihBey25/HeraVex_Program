@@ -1241,6 +1241,260 @@ fn save_exchange_rates(app: AppHandle, rates: std::collections::HashMap<String, 
     save_settings_to_disk(&app, &settings)
 }
 
+// ── Team workspace members file (v0.9.7) ────────────────────────────────────
+//
+// `heravex-members.json` lives at the root of every team workspace. It
+// records who has connected, when they joined, and their role. The
+// frontend is the source of truth for the schema; Rust just reads/
+// writes the file atomically (temp-then-rename) so a half-flushed
+// write from one cloud client doesn't get picked up by another.
+//
+// Why the workspace path is passed by the caller instead of being read
+// from settings: the call sites in the frontend already know whether
+// the active workspace is a team folder, and pinning the path argument
+// keeps these commands testable in isolation.
+
+#[tauri::command]
+fn team_read_members(workspace_path: String) -> Result<String, String> {
+    let path = std::path::PathBuf::from(&workspace_path).join("heravex-members.json");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(s),
+        // Missing file is normal — the first member to join writes it.
+        // Return an empty JSON document so the caller can hand it
+        // straight to JSON.parse without a special-case.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".into()),
+        Err(e) => Err(format!("members.json okunamadi: {e}")),
+    }
+}
+
+#[tauri::command]
+fn team_write_members(workspace_path: String, content: String) -> Result<(), String> {
+    let dir = std::path::PathBuf::from(&workspace_path);
+    if !dir.is_dir() {
+        return Err(format!("workspace klasoru yok: {workspace_path}"));
+    }
+    let target = dir.join("heravex-members.json");
+    let tmp = dir.join("heravex-members.json.tmp");
+    std::fs::write(&tmp, content.as_bytes())
+        .map_err(|e| format!("members.json gecici dosya yazilamadi: {e}"))?;
+    std::fs::rename(&tmp, &target)
+        .map_err(|e| format!("members.json atomik degistirilemedi: {e}"))?;
+    Ok(())
+}
+
+// ── Global notes search (v0.9.7 Tur 3b) ─────────────────────────────────────
+//
+// Scans every saved note (global studio notes + per-game GDD notes)
+// and returns ranked matches for `query`. The ranking is intentionally
+// simple — title hits weigh heaviest, body substring hits next, fuzzy
+// character-order matches last — because note counts in HeraVex are
+// always low-hundreds at most. A future heavy index (tantivy) can
+// slot in behind the same command signature.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchHit {
+    kind: String,        // "global" | "game"
+    note_id: String,
+    game_id: Option<String>,
+    title: String,
+    snippet: String,
+    score: i32,
+}
+
+fn strip_html(s: &str) -> String {
+    // Very small HTML-tag stripper — kept inline so we don't pull a
+    // dependency just to render snippets. Handles the tags the editor
+    // produces; anything more exotic falls through as plain text.
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&nbsp;", " ")
+       .replace("&amp;", "&")
+       .replace("&lt;", "<")
+       .replace("&gt;", ">")
+       .replace("&quot;", "\"")
+}
+
+fn score_match(query_l: &str, title_l: &str, body_l: &str) -> i32 {
+    let mut score = 0i32;
+    if title_l.contains(query_l) { score += 100; }
+    if title_l.starts_with(query_l) { score += 30; }
+    let body_hits = body_l.matches(query_l).count() as i32;
+    score += body_hits.min(50) * 5;
+    // Cheap "fuzzy" — every character of the query appears in order
+    // somewhere in the title. Weakest signal so a typo still surfaces.
+    if score == 0 {
+        let mut it = title_l.chars();
+        let mut all_in = true;
+        for ch in query_l.chars() {
+            if it.find(|c| *c == ch).is_none() { all_in = false; break; }
+        }
+        if all_in && !query_l.is_empty() { score += 10; }
+    }
+    score
+}
+
+fn build_snippet(body: &str, query_l: &str, max_len: usize) -> String {
+    if query_l.is_empty() {
+        return body.chars().take(max_len).collect();
+    }
+    let body_l = body.to_lowercase();
+    let idx = body_l.find(query_l).unwrap_or(0);
+    // Walk back ~30 chars from the match so the user gets context
+    // before the highlighted term.
+    let head_target = idx.saturating_sub(30);
+    let start = body
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|i| *i >= head_target)
+        .unwrap_or(0);
+    let mut end = start;
+    let mut taken = 0usize;
+    for (i, _) in body[start..].char_indices() {
+        if taken >= max_len { break; }
+        end = start + i;
+        taken += 1;
+    }
+    let mut snippet = String::new();
+    if start > 0 { snippet.push('…'); }
+    snippet.push_str(&body[start..=end.min(body.len() - 1)]);
+    if end < body.len() - 1 { snippet.push('…'); }
+    snippet
+}
+
+#[tauri::command]
+fn search_notes(app: AppHandle, query: String, limit: Option<usize>) -> Result<Vec<SearchHit>, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cap = limit.unwrap_or(20).min(100);
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+
+    // Global notes
+    let global = load_notes_from_disk(&app).unwrap_or_default();
+    for n in global.into_iter() {
+        let body = strip_html(&n.content);
+        let title_l = n.title.to_lowercase();
+        let body_l = body.to_lowercase();
+        let score = score_match(&q, &title_l, &body_l);
+        if score > 0 {
+            hits.push(SearchHit {
+                kind: "global".into(),
+                note_id: n.id,
+                game_id: None,
+                title: n.title,
+                snippet: build_snippet(&body, &q, 120),
+                score,
+            });
+        }
+    }
+
+    // Per-game notes (the legacy `game.notes` blob — one note per
+    // game, used as the GDD)
+    let games = load_games_from_disk(&app).unwrap_or_default();
+    for g in games.into_iter() {
+        let body = strip_html(&g.notes);
+        if body.trim().is_empty() { continue; }
+        let title_l = g.title.to_lowercase();
+        let body_l = body.to_lowercase();
+        let score = score_match(&q, &title_l, &body_l);
+        if score > 0 {
+            hits.push(SearchHit {
+                kind: "game".into(),
+                note_id: g.id.clone(),
+                game_id: Some(g.id),
+                title: g.title,
+                snippet: build_snippet(&body, &q, 120),
+                score,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| b.score.cmp(&a.score));
+    hits.truncate(cap);
+    Ok(hits)
+}
+
+/// Fetch live FX rates from the internet, tried in order so a single
+/// provider hiccup doesn't leave the user with stale numbers.
+///
+/// Why this lives in Rust and not the renderer:
+///   * The frontend's `connect-src` CSP would have to allow every
+///     fallback host explicitly; piping through reqwest sidesteps
+///     CSP entirely.
+///   * Frankfurter (the only host the CSP previously allowed) dropped
+///     TRY from its ECB-derived feed in March 2022, so TRY was
+///     permanently stuck on the disk fallback. open.er-api.com still
+///     carries TRY along with ~160 other currencies.
+///
+/// Returns a map shaped exactly like the frontend's `exchangeRates`
+/// slice: `USD: 1` plus one entry per non-USD currency, where the
+/// value is **USD per 1 unit of CUR** (inverse of the typical "1 USD
+/// = X CUR" form). The renderer multiplies amounts by this number, so
+/// every consumer downstream gets the conversion right.
+#[tauri::command]
+async fn fetch_live_exchange_rates() -> Result<std::collections::HashMap<String, f64>, String> {
+    use serde_json::Value;
+
+    let client = build_http_client()?;
+    // Listed in preference order. open.er-api.com is the only one that
+    // reliably ships TRY today; the others are kept as safety nets.
+    let sources = [
+        "https://open.er-api.com/v6/latest/USD",
+        "https://api.exchangerate.host/latest?base=USD",
+        "https://api.frankfurter.app/latest?base=USD",
+    ];
+
+    let mut last_err = String::from("Hicbir kur kaynagi cevap vermedi.");
+    for url in sources {
+        match client.get(url).send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    last_err = format!("{url} -> HTTP {}", resp.status());
+                    continue;
+                }
+                let json: Value = match resp.json().await {
+                    Ok(v) => v,
+                    Err(e) => { last_err = format!("{url} -> JSON: {e}"); continue; }
+                };
+                let raw = json.get("rates").and_then(|v| v.as_object());
+                let raw = match raw {
+                    Some(o) => o,
+                    None => { last_err = format!("{url} -> rates yok"); continue; }
+                };
+
+                let mut out: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+                out.insert("USD".into(), 1.0);
+                for (code, val) in raw {
+                    if code == "USD" { continue; }
+                    let per_usd = val.as_f64().unwrap_or(0.0);
+                    if per_usd.is_finite() && per_usd > 0.0 {
+                        // API ships "1 USD = X CUR" → invert to "USD per CUR"
+                        out.insert(code.clone(), 1.0 / per_usd);
+                    }
+                }
+                if out.len() < 10 {
+                    last_err = format!("{url} -> az veri ({} kur)", out.len());
+                    continue;
+                }
+                return Ok(out);
+            }
+            Err(e) => { last_err = format!("{url} -> {e}"); continue; }
+        }
+    }
+    Err(last_err)
+}
+
 #[tauri::command]
 fn save_currency_labels(app: AppHandle, label1: String, label2: String) -> Result<(), String> {
     let mut settings = load_settings_from_disk(&app)?;
@@ -5095,6 +5349,10 @@ fn main() {
             set_preferred_language,
             save_global_expenses,
             save_exchange_rates,
+            fetch_live_exchange_rates,
+            team_read_members,
+            team_write_members,
+            search_notes,
             save_currency_labels,
             save_release_template,
             delete_game,

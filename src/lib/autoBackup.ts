@@ -52,9 +52,19 @@ export function isBackupDue(prefs: BackupPrefsSlice, now: Date, lastAt: number):
       return now.getHours() > hh || (now.getHours() === hh && now.getMinutes() >= mm);
     }
     case "weekly": {
-      // 7-day floor since lastAt at or after the scheduled time.
+      // Two-part gate, matching the `daily` case's shape so the policy
+      // reads consistently:
+      //   (a) at least 7 calendar days have elapsed since the last run;
+      //   (b) we're on a different calendar day from the last run;
+      //   (c) the user's scheduled HH:mm has passed today.
+      // (a) prevents the schedule firing twice in the same week. (b)
+      // defends against a manually-cleared localStorage that resets
+      // lastAt to 0 during the same day — without it the user could
+      // see two runs an hour apart. (c) is the time-of-day trigger.
       const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
       if (now.getTime() - lastAt < sevenDaysMs) return false;
+      const dayChanged = now.toDateString() !== lastDate.toDateString();
+      if (!dayChanged) return false;
       const [hh, mm] = parseTime(prefs.scheduledTime);
       return now.getHours() > hh || (now.getHours() === hh && now.getMinutes() >= mm);
     }

@@ -152,8 +152,83 @@ export default function App() {
   );
 
   useEffect(() => {
+    // `init` is a Zustand action created once at store init time, so
+    // its reference is stable across every render — the dep array
+    // effectively behaves like [] and this runs exactly once on mount.
+    // The dep is kept (rather than []) so exhaustive-deps stays happy.
     void init();
   }, [init]);
+
+  // Viewport hysteresis (v0.9.7).
+  //
+  // Toggle two root classes that drive the CSS responsiveness pass:
+  //   • `viewport-narrow`       (< 1200px) — sidebar collapses to icon-only
+  //   • `viewport-very-narrow`  (<  900px) — dashboard grid drops to 1 col
+  //
+  // Hysteresis bands avoid oscillation when the user is dragging a
+  // window resize handle: the class only re-enables once the viewport
+  // crosses the expansion threshold (1400 / 1080), not the contraction
+  // threshold. The thresholds were tuned against a 13" laptop (1366),
+  // a 15" laptop (1920), and a 27" desktop (2560).
+  useEffect(() => {
+    const COLLAPSE_NARROW = 1200, EXPAND_NARROW = 1400;
+    const COLLAPSE_VNARROW =  900, EXPAND_VNARROW = 1080;
+    const root = document.documentElement;
+    const apply = () => {
+      const w = window.innerWidth;
+      const isNarrow  = root.classList.contains("viewport-narrow");
+      const isVNarrow = root.classList.contains("viewport-very-narrow");
+      if (!isNarrow  && w < COLLAPSE_NARROW)  root.classList.add("viewport-narrow");
+      if ( isNarrow  && w > EXPAND_NARROW)    root.classList.remove("viewport-narrow");
+      if (!isVNarrow && w < COLLAPSE_VNARROW) root.classList.add("viewport-very-narrow");
+      if ( isVNarrow && w > EXPAND_VNARROW)   root.classList.remove("viewport-very-narrow");
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => window.removeEventListener("resize", apply);
+  }, []);
+
+  // Auto-self-register membership for team workspaces (v0.9.7).
+  //
+  // After init resolves we check whether the active workspace is a
+  // team folder (registry mode OR cloud-path heuristic). If so, we
+  // write our identity into `heravex-members.json` — joining the
+  // team if it's our first time, or bumping lastSeenAt otherwise.
+  // The leader gating in teamMembers.ts handles the "first user
+  // becomes leader" rule. Failures are swallowed: the user can still
+  // use the workspace, they just won't appear in the panel until the
+  // next launch.
+  const studioIdentity = useAppStore((s) => s.studioIdentity);
+  const profileSlice = useAppStore((s) => s.profile);
+  const userAvatarPath = useAppStore((s) => s.avatarPath);
+  const joinedTeamRef = useRef(false);
+  useEffect(() => {
+    if (isLoading || joinedTeamRef.current) return;
+    void (async () => {
+      try {
+        const { getWorkspacePath } = await import("./lib/storage");
+        const wp = await getWorkspacePath();
+        if (!wp) return; // no workspace = no team membership to register
+        const { detectCloudProvider, loadWorkspaces } = await import("./lib/workspaces");
+        const ws = loadWorkspaces().find((w) => w.path === wp);
+        const isTeam = ws?.mode === "team" || !!detectCloudProvider(wp);
+        if (!isTeam) return;
+        const { joinTeamWorkspace } = await import("./lib/teamMembers");
+        const displayName = profileSlice.displayName?.trim()
+          || studioIdentity.studioName?.trim()
+          || (language === "tr" ? "İsimsiz" : "Anonymous");
+        await joinTeamWorkspace(wp, {
+          displayName,
+          avatarPath: userAvatarPath || null,
+        });
+        joinedTeamRef.current = true;
+        // Tell any open Members panel to refresh.
+        window.dispatchEvent(new CustomEvent("heravex:team-members-changed"));
+      } catch (err) {
+        if (import.meta.env.DEV) console.warn("[team-members] self-register failed:", err);
+      }
+    })();
+  }, [isLoading, studioIdentity.studioName, profileSlice.displayName, userAvatarPath, language]);
 
   // Warm the lazy-page bundle cache once the initial paint is settled.
   // The user reported GameDetail + Analytics taking ~1s on first open
@@ -352,6 +427,14 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let lastSig: string | null = null;
+    // Track consecutive poll failures. Production builds previously
+    // dropped these on the floor (dev-only console.warn), so a silently
+    // broken Team Mode would never reach the user. After N back-to-back
+    // failures we surface a single sticky toast and back off until the
+    // next success resets the counter.
+    let failStreak = 0;
+    let notifiedDown = false;
+    const FAIL_THRESHOLD = 3;
     const tick = async () => {
       try {
         const wp = await import("./lib/storage").then((m) => m.getWorkspacePath());
@@ -364,6 +447,10 @@ export default function App() {
           localStorage.setItem("heravex_last_sync_check", String(Date.now()));
           localStorage.setItem("heravex_last_sync_sig",   sig);
         } catch { /* quota */ }
+        if (failStreak > 0) {
+          failStreak = 0;
+          notifiedDown = false;
+        }
         if (lastSig === null) { lastSig = sig; return; }
         if (sig !== lastSig) {
           const prev = lastSig;
@@ -371,9 +458,20 @@ export default function App() {
           surfaceRemoteToast.current(prev, sig);
         }
       } catch (err) {
-        if (!cancelled) {
-          const isDev = import.meta.env.DEV;
-          if (isDev) console.warn("[team-mode] poll failed:", err);
+        if (cancelled) return;
+        failStreak++;
+        const isDev = import.meta.env.DEV;
+        if (isDev) console.warn("[team-mode] poll failed:", err);
+        if (failStreak >= FAIL_THRESHOLD && !notifiedDown) {
+          notifiedDown = true;
+          // One toast per outage. Cleared the next successful tick.
+          const { showToast: toast, language: lang } = useAppStore.getState();
+          toast(
+            lang === "tr"
+              ? "Ekip modu eşitleme şu an yapılamıyor."
+              : "Team mode sync is currently failing.",
+            "warning",
+          );
         }
       }
     };

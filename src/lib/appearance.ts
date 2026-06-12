@@ -117,6 +117,13 @@ export interface TypographySlice {
   antialiasing: boolean;
   boldWeight: 500 | 600 | 700;
   letterSpacing: "tight" | "normal" | "wide";
+  /** v0.9.7+ — when true, `--font-size-base` resolves through a
+   *  `clamp()` keyed off the viewport width. The user's `baseSize`
+   *  becomes the upper anchor; the lower anchor is ~82% of it. Pairs
+   *  well with the viewport-narrow auto-collapse so the whole UI
+   *  contracts gracefully on laptop displays. Off by default — users
+   *  with strong opinions on font size shouldn't have it disturbed. */
+  autoScale?: boolean;
 }
 
 export const DEFAULT_TYPOGRAPHY: TypographySlice = {
@@ -130,6 +137,7 @@ export const DEFAULT_TYPOGRAPHY: TypographySlice = {
   antialiasing: true,
   boldWeight: 600,
   letterSpacing: "normal",
+  autoScale: false,
 };
 
 /** Maps `AppFontId` to an actual CSS font-family stack. Pure CSS. */
@@ -177,14 +185,26 @@ export interface LayoutSlice {
   hoverEffects: boolean;
   focusRing: boolean;
 
-  /** Visibility of the three Dashboard widgets. Defaults all-on; users
-   *  can hide ones they don't use (e.g. "tasks" panel for a soloDev
-   *  who tracks only via Notes). */
+  /** v0.9.7+ Dashboard panel configuration.
+   *
+   *  The Dashboard is fully user-arranged: each panel has a stable id
+   *  (the rendering switch picks the body) plus an `enabled` flag, and
+   *  the array order IS the on-screen order. Drag-reorder in Settings →
+   *  Layout writes this list back. Hidden panels reflow the grid via
+   *  CSS `auto-fit` so the remaining cards expand naturally.
+   *
+   *  Old v0.9 builds stored `{ overview, projects, tasks }` booleans;
+   *  `loadLayout` detects that shape and migrates to the canonical
+   *  panel list on first read. */
   dashboardWidgets: {
-    overview: boolean;
-    projects: boolean;
-    tasks: boolean;
+    panels: DashboardPanelEntry[];
   };
+
+  /** Which card fills the hero left column. See `DashboardHeroCard`
+   *  above for the full menu. Defaults to "studioCard" because every
+   *  user has a studio identity at minimum, even if it's just the
+   *  placeholder name. */
+  dashboardHeroCard?: DashboardHeroCard;
 
   /** When true, page panels (.panel, .kcard, .task-card, …) lose their
    *  card chrome — background, border, blur — and the page backdrop
@@ -196,6 +216,49 @@ export interface LayoutSlice {
    *  item. When false the active state is a plain background swap. */
   sidebarSlideIndicator: boolean;
 }
+
+/** Canonical id list for Dashboard panels. Add new entries here AND
+ *  in `DEFAULT_DASHBOARD_PANELS` below so users see the new panel
+ *  appear on their next launch.
+ *
+ *  v0.9.7+: `quickActions` was retired — the floating QuickCapture FAB
+ *  in the bottom-right corner replaces it entirely. The QuickCapture
+ *  widget has its own General → "Hızlı yakalama balonu" toggle. */
+export type DashboardPanelId =
+  | "recentGames"
+  | "tasksAtRisk"
+  | "spendTrend"
+  | "overview";
+
+/** Which card fills the hero's left column. The user picks from
+ *  Settings → Layout → Dashboard. All variants were discussed with
+ *  the user in v0.9.7's hero-detail iteration — implementing the
+ *  full menu rather than just one keeps the surface useful for
+ *  whichever workflow the user actually has. */
+export type DashboardHeroCard =
+  | "studioCard"        // brand + game/shipped/focus/days stats
+  | "sirada"            // next-up task (overdue → urgent → soon)
+  | "pomodoro"          // focus session state + today's sessions
+  | "quickCapture"      // inline input → new note/task
+  | "releaseCountdown"  // closest release-like milestones by due date
+  | "todayMicro"        // today's closed-task count + focus minutes
+  | "todayGoal"         // editable single-line goal/mantra
+  | "pinnedShortcuts"   // recently-active game shortcuts (auto-pinned)
+  | "none";             // hide the left card, hero shrinks accordingly
+
+export interface DashboardPanelEntry {
+  id: DashboardPanelId;
+  enabled: boolean;
+}
+
+/** Default render order — every panel on. The user reorders / toggles
+ *  via Settings → Layout → Dashboard panels. */
+export const DEFAULT_DASHBOARD_PANELS: DashboardPanelEntry[] = [
+  { id: "recentGames",  enabled: true },
+  { id: "tasksAtRisk",  enabled: true },
+  { id: "spendTrend",   enabled: true },
+  { id: "overview",     enabled: true },
+];
 
 export const DEFAULT_LAYOUT: LayoutSlice = {
   density: "standard",
@@ -214,7 +277,8 @@ export const DEFAULT_LAYOUT: LayoutSlice = {
   borderWeight: "standard",
   hoverEffects: true,
   focusRing: true,
-  dashboardWidgets: { overview: true, projects: true, tasks: true },
+  dashboardWidgets: { panels: DEFAULT_DASHBOARD_PANELS },
+  dashboardHeroCard: "studioCard",
   transparentPanels: false,
   sidebarSlideIndicator: true,
 };
@@ -291,7 +355,12 @@ export function applyAppearanceToDom(
     "--font-editor",
     typography.editorFont === "system" ? APP_FONT_STACK[typography.appFont] : EDITOR_FONT_STACK[typography.editorFont],
   );
+  // `--font-size-base-user` carries the user's literal preference; the
+  // fluid-type CSS rule reads it to build the clamp() upper anchor.
+  // When auto-scale is off, --font-size-base is just the literal value.
+  root.style.setProperty("--font-size-base-user", `${typography.baseSize}px`);
   root.style.setProperty("--font-size-base", `${typography.baseSize}px`);
+  root.classList.toggle("fluid-type", typography.autoScale === true);
   root.style.setProperty("--font-size-editor", `${typography.editorSize}px`);
   root.style.setProperty("--line-height", String(typography.lineHeight));
   root.style.setProperty("--heading-scale", HEADING_SCALE_VALUE[typography.headingScale]);
@@ -302,6 +371,14 @@ export function applyAppearanceToDom(
 
   // ── Layout
   root.style.setProperty("--density-scale", String(DENSITY_SCALE[layout.density]));
+  // Density class hook — CSS rules under `:root.density-compact …`
+  // strip decorative chrome (eyebrows, helper text) so a dense user
+  // doesn't waste verticals on labels they already know. The other
+  // two modes are no-ops at the class level.
+  for (const cls of Array.from(root.classList)) {
+    if (cls.startsWith("density-")) root.classList.remove(cls);
+  }
+  root.classList.add(`density-${layout.density}`);
   root.style.setProperty("--sidebar-width", `${layout.sidebarWidth}px`);
   root.style.setProperty("--anim-duration", ANIMATION_DURATION[layout.animationSpeed]);
   root.style.setProperty("--radius-md", CORNER_RADIUS[layout.cornerRadius]);
@@ -366,7 +443,63 @@ export function loadTypography(): TypographySlice {
   return safeRead(KEY_TYPOGRAPHY, DEFAULT_TYPOGRAPHY);
 }
 export function loadLayout(): LayoutSlice {
-  return safeRead(KEY_LAYOUT, DEFAULT_LAYOUT);
+  const raw = safeRead<LayoutSlice & { dashboardWidgets?: unknown }>(KEY_LAYOUT, DEFAULT_LAYOUT);
+  return { ...raw, dashboardWidgets: normaliseDashboardWidgets(raw.dashboardWidgets) };
+}
+
+/** Migrates v0.9 → v0.9.7 dashboardWidgets storage in-place.
+ *
+ *  v0.9 shape: `{ overview: bool, projects: bool, tasks: bool }`
+ *  v0.9.7 shape: `{ panels: [{ id, enabled }, …] }` — array order is render order.
+ *
+ *  Mapping when migrating: overview → keeps id "overview"; projects →
+ *  "recentGames" (the new equivalent — last-updated games list);
+ *  tasks → "tasksAtRisk" (the equivalent — overdue + soonest pending).
+ *  New-in-v0.9.7 panels (`spendTrend`, `quickActions`) default to
+ *  enabled because they're additive value and the spec says hidden
+ *  panels should never leave the dashboard looking empty.
+ *
+ *  Also fills in any panel id that's missing from the persisted list
+ *  (e.g. user opens an older build then upgrades — the new panel gets
+ *  appended to the end so the existing order is preserved). */
+function normaliseDashboardWidgets(value: unknown): { panels: DashboardPanelEntry[] } {
+  // Already in the new shape — sanity-check ids and append missing ones.
+  if (value && typeof value === "object" && Array.isArray((value as { panels?: unknown }).panels)) {
+    const seen = new Set<string>();
+    const out: DashboardPanelEntry[] = [];
+    for (const p of (value as { panels: unknown[] }).panels) {
+      if (!p || typeof p !== "object") continue;
+      const id = (p as { id?: unknown }).id;
+      const enabled = (p as { enabled?: unknown }).enabled;
+      if (typeof id !== "string") continue;
+      const known = DEFAULT_DASHBOARD_PANELS.find((d) => d.id === id);
+      if (!known) continue;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id: known.id, enabled: typeof enabled === "boolean" ? enabled : true });
+    }
+    // Append any new-in-this-version panels the user hasn't seen yet.
+    for (const d of DEFAULT_DASHBOARD_PANELS) {
+      if (!seen.has(d.id)) out.push({ ...d });
+    }
+    return { panels: out };
+  }
+  // Legacy v0.9 shape — migrate by mapping the three booleans.
+  if (value && typeof value === "object") {
+    const legacy = value as { overview?: unknown; projects?: unknown; tasks?: unknown };
+    const enabledFromLegacy = (id: DashboardPanelId): boolean => {
+      switch (id) {
+        case "overview":     return legacy.overview     !== false;
+        case "recentGames":  return legacy.projects     !== false;
+        case "tasksAtRisk":  return legacy.tasks        !== false;
+        default:             return true; // new panels default-on
+      }
+    };
+    return {
+      panels: DEFAULT_DASHBOARD_PANELS.map((d) => ({ id: d.id, enabled: enabledFromLegacy(d.id) })),
+    };
+  }
+  return { panels: DEFAULT_DASHBOARD_PANELS.map((d) => ({ ...d })) };
 }
 export function saveAppearance(s: AppearanceSlice) { safeWrite(KEY_APPEARANCE, s); }
 export function saveTypography(s: TypographySlice) { safeWrite(KEY_TYPOGRAPHY, s); }

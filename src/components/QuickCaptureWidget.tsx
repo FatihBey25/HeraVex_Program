@@ -29,7 +29,17 @@ export function QuickCaptureWidget() {
   // to true so most users get the widget out of the box.
   if (general.quickCapture === false) return null;
 
-  const tr = (en: string, t: string) => (language === "tr" ? t : en);
+  // 4-way translator. The previous `tr(en, tr)` form silently fell
+  // through to English for FR/ES users; the explicit map keeps every
+  // string visible to translators in one place.
+  const tr = (en: string, t: string, fr?: string, es?: string) => {
+    switch (language) {
+      case "tr": return t;
+      case "fr": return fr ?? en;
+      case "es": return es ?? en;
+      default:   return en;
+    }
+  };
 
   const newNote = () => {
     setWorkspaceTab("notes");
@@ -49,19 +59,19 @@ export function QuickCaptureWidget() {
           <button type="button" className="quick-capture-act" onClick={newNote}>
             <FileText size={14} />
             <div>
-              <strong>{tr("New note", "Yeni not")}</strong>
-              <small>{tr("Markdown, draft, idea", "Markdown, taslak, fikir")}</small>
+              <strong>{tr("New note", "Yeni not", "Nouvelle note", "Nueva nota")}</strong>
+              <small>{tr("Markdown, draft, idea", "Markdown, taslak, fikir", "Markdown, brouillon, idée", "Markdown, borrador, idea")}</small>
             </div>
           </button>
           <button type="button" className="quick-capture-act" onClick={newTask}>
             <ListTodo size={14} />
             <div>
-              <strong>{tr("New task", "Yeni görev")}</strong>
-              <small>{tr("Pick a game, set due date", "Oyun seç, tarih ata")}</small>
+              <strong>{tr("New task", "Yeni görev", "Nouvelle tâche", "Nueva tarea")}</strong>
+              <small>{tr("Pick a game, set due date", "Oyun seç, tarih ata", "Choisir un jeu, définir l'échéance", "Elige un juego, fija la fecha")}</small>
             </div>
           </button>
           <span className="quick-capture-hint">
-            {tr("Shortcuts:", "Kısayollar:")} <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd>
+            {tr("Shortcuts:", "Kısayollar:", "Raccourcis :", "Atajos:")} <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd>
           </span>
         </div>
       )}
@@ -69,8 +79,8 @@ export function QuickCaptureWidget() {
         type="button"
         className={`quick-capture-fab${open ? " is-open" : ""}`}
         onClick={() => setOpen((o) => !o)}
-        title={tr("Quick capture", "Hızlı yakalama")}
-        aria-label={tr("Quick capture", "Hızlı yakalama")}
+        title={tr("Quick capture", "Hızlı yakalama", "Capture rapide", "Captura rápida")}
+        aria-label={tr("Quick capture", "Hızlı yakalama", "Capture rapide", "Captura rápida")}
       >
         {open ? <X size={18} /> : <Plus size={18} />}
       </button>

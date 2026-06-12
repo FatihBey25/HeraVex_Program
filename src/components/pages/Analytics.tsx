@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../../store";
 import { calculateAccumulatedAmount } from "../PieChartWidget";
+import { totalSharedSpendForGame } from "../../lib/expenseAllocation";
 import {
   fetchStoreData,
   exportFinancialCsv,
@@ -76,7 +77,11 @@ type ExportFormat = "pdf" | "csv" | "json";
 
 export function Analytics() {
   const { games, globalExpenses, exchangeRates, language, showToast, showError, setWorkspaceTab } = useAppStore();
-  const [earnings, setEarnings] = useState<{ total: number; currency: string | null }>({ total: 0, currency: null });
+  const [earnings, setEarnings] = useState<{
+    total: number;
+    currency: string | null;
+    perGame: Record<string, number>;
+  }>({ total: 0, currency: null, perGame: {} });
   const [loadingRoi, setLoadingRoi] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -158,17 +163,22 @@ export function Analytics() {
     return last30 / 30;
   }, [allExpenses, exchangeRates]);
 
-  // Remaining budget across all games with a budget set
+  // Remaining budget across all games with a budget set. Per-game
+  // spend now includes the allocated share of shared general
+  // expenses (e.g. a $20 Claude Code sub split across 4 games adds
+  // $5 to each game's spend).
   const remainingBudget = useMemo(() => {
     return games.reduce((s, g) => {
       if (!g.budget) return s;
-      const spent = (g.expenses ?? []).reduce(
+      const direct = (g.expenses ?? []).reduce(
         (ss, e) => ss + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")),
         0
       );
-      return s + Math.max(0, g.budget - spent);
+      const shared = totalSharedSpendForGame(globalExpenses, g.id, rate);
+      return s + Math.max(0, g.budget - direct - shared);
     }, 0);
-  }, [games, exchangeRates]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [games, exchangeRates, globalExpenses]);
 
   // Category breakdown for donut (with semantic colors)
   const categoryData = useMemo(() => {
@@ -188,20 +198,23 @@ export function Analytics() {
       .sort((a, b) => b.value - a.value);
   }, [allExpenses, exchangeRates, language]);
 
-  // Fetch itch earnings for all mapped games (ROI signal)
+  // Fetch itch earnings for all mapped games (ROI signal). Per-game
+  // map is keyed by gameId so the P&L table below can show each
+  // project's revenue alongside its allocated spend.
   const refreshEarnings = async () => {
     setLoadingRoi(true);
     let total = 0;
     let currency: string | null = null;
+    const perGame: Record<string, number> = {};
     for (const g of games) {
       const itchId = g.storeMappings?.itch?.id;
       if (!itchId) continue;
       try {
         const data = await fetchStoreData("itch", itchId);
         if (data.earnings != null) {
-          // Convert to USD if currency present and rate known
           const c = data.currency ?? "USD";
           const usd = data.earnings * (1 / (rate(c) || 1));
+          perGame[g.id] = (perGame[g.id] ?? 0) + usd;
           total += usd;
           currency = currency ?? c;
         }
@@ -209,7 +222,7 @@ export function Analytics() {
         // skip silently — toast not needed for aggregate
       }
     }
-    setEarnings({ total, currency });
+    setEarnings({ total, currency, perGame });
     setLoadingRoi(false);
   };
 
@@ -692,6 +705,56 @@ export function Analytics() {
                     "Henüz başabaş noktasının altında. Üretmeye devam."
                   )}
             </p>
+
+            {/* ── Per-game P&L ─────────────────────────────────────────
+             *  Game-level revenue vs spend (incl. shared overhead share).
+             *  Helps the solo dev see which project is actually paying
+             *  for itself rather than only the studio-wide aggregate. */}
+            <div className="roi-per-game">
+              <p className="eyebrow" style={{ marginTop: 16, marginBottom: 8 }}>
+                {tr("PER GAME", "OYUNA GÖRE")}
+              </p>
+              <div className="roi-per-game-grid">
+                <div className="roi-per-game-head">
+                  <span>{tr("Game", "Oyun")}</span>
+                  <span>{tr("Revenue", "Gelir")}</span>
+                  <span>{tr("Spend", "Gider")}</span>
+                  <span>{tr("Net", "Net")}</span>
+                </div>
+                {games
+                  .filter((g) => {
+                    const rev = earnings.perGame[g.id] ?? 0;
+                    const direct = (g.expenses ?? []).reduce((s, e) => s + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")), 0);
+                    const shared = totalSharedSpendForGame(globalExpenses, g.id, rate);
+                    return rev > 0 || direct > 0 || shared > 0;
+                  })
+                  .map((g) => {
+                    const rev = earnings.perGame[g.id] ?? 0;
+                    const direct = (g.expenses ?? []).reduce((s, e) => s + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")), 0);
+                    const shared = totalSharedSpendForGame(globalExpenses, g.id, rate);
+                    const spend = direct + shared;
+                    const net = rev - spend;
+                    return (
+                      <div key={g.id} className="roi-per-game-row">
+                        <span className="roi-per-game-name" title={g.title}>{g.title}</span>
+                        <span style={{ color: "#34d399" }}>{usd(rev)}</span>
+                        <span style={{ color: "#f87171" }} title={shared > 0 ? `${usd(direct)} + ${usd(shared)} shared` : undefined}>
+                          {usd(spend)}{shared > 0 ? " *" : ""}
+                        </span>
+                        <span style={{ color: net >= 0 ? "#34d399" : "#f87171", fontWeight: 700 }}>
+                          {net >= 0 ? "+" : ""}{usd(net)}
+                        </span>
+                      </div>
+                    );
+                  })}
+              </div>
+              <small style={{ color: "#94a3b8", fontSize: 11 }}>
+                {tr(
+                  "* includes per-game share of shared general expenses",
+                  "* paylaşılan genel giderlerin oyun başına payı dahildir"
+                )}
+              </small>
+            </div>
           </>
         )}
       </motion.section>

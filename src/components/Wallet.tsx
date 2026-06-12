@@ -1,10 +1,11 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Trash, Receipt, PieChart as PieIcon } from "lucide-react";
 import { imgSrc } from "../lib/images";
 import { useAppStore } from "../store";
 import { PieChartWidget, calculateAccumulatedAmount } from "./PieChartWidget";
 import { ExpenseTrendChart } from "./shared/ExpenseTrendChart";
 import { formatNumber } from "../lib/formatLocale";
+import { totalSharedSpendForGame } from "../lib/expenseAllocation";
 import { ConfirmDialog } from "./shared/ConfirmDialog";
 import { EmptyState } from "./shared/EmptyState";
 import { isGeneralGame } from "../lib/general-game";
@@ -107,9 +108,25 @@ interface HistoryProps {
   emptyLabel: string;
   rate: (c: string) => number;
   onDelete: (id: string, gameId: string | null) => void;
+  /** Only passed for the General Expenses list — enables the
+   *  "share with games" affordance. Null on per-project lists. */
+  allGames?: { id: string; title: string }[];
+  onUpdateGlobal?: (id: string, patch: Partial<ExpenseItem>) => void;
 }
 
-function ExpenseHistory({ expenses, gameId, historyLabel, emptyLabel, rate, onDelete }: HistoryProps) {
+function ExpenseHistory({ expenses, gameId, historyLabel, emptyLabel, rate, onDelete, allGames, onUpdateGlobal }: HistoryProps) {
+  const [openId, setOpenId] = useState<string | null>(null);
+  const tr = (en: string, t: string) => (typeof document !== "undefined" && (document.documentElement.lang || "").startsWith("tr") ? t : en);
+
+  const toggleGameShare = (exp: ExpenseItem, gameIdToToggle: string) => {
+    if (!onUpdateGlobal) return;
+    const prev = exp.sharedWithGameIds ?? [];
+    const next = prev.includes(gameIdToToggle)
+      ? prev.filter((id) => id !== gameIdToToggle)
+      : [...prev, gameIdToToggle];
+    onUpdateGlobal(exp.id, { sharedWithGameIds: next });
+  };
+
   return (
     <div className="expense-history-section">
       <h4 className="expense-history-title">{historyLabel}</h4>
@@ -121,29 +138,71 @@ function ExpenseHistory({ expenses, gameId, historyLabel, emptyLabel, rate, onDe
         />
       ) : (
         <div className="expense-history-list">
-          {expenses.map((e) => (
-            <div key={e.id} className="expense-history-row">
-              <div className="expense-history-body">
-                <div className="expense-history-top">
-                  <strong className="expense-history-name">{e.title}{e.isRecurring && " 🔄"}</strong>
-                  <span className="expense-history-amount">{e.amount.toFixed(2)} {e.currency}</span>
-                </div>
-                <div className="expense-history-meta">
-                  <span className="expense-category-chip">{e.category}</span>
-                  <span className="expense-history-date">{e.spentAt}</span>
-                  {e.isRecurring && (
-                    <span className="expense-history-usd">${calculateAccumulatedAmount(e, rate(e.currency ?? "USD")).toFixed(2)}</span>
+          {expenses.map((e) => {
+            const shareList = e.sharedWithGameIds ?? [];
+            const showShareAffordance = !!allGames && !!onUpdateGlobal;
+            const isOpen = openId === e.id;
+            const perGame = shareList.length > 0 ? e.amount / shareList.length : 0;
+            return (
+              <div key={e.id} className="expense-history-row">
+                <div className="expense-history-body">
+                  <div className="expense-history-top">
+                    <strong className="expense-history-name">{e.title}{e.isRecurring && " 🔄"}</strong>
+                    <span className="expense-history-amount">{e.amount.toFixed(2)} {e.currency}</span>
+                  </div>
+                  <div className="expense-history-meta">
+                    <span className="expense-category-chip">{e.category}</span>
+                    <span className="expense-history-date">{e.spentAt}</span>
+                    {e.isRecurring && (
+                      <span className="expense-history-usd">${calculateAccumulatedAmount(e, rate(e.currency ?? "USD")).toFixed(2)}</span>
+                    )}
+                    {showShareAffordance && shareList.length > 0 && (
+                      <span className="expense-share-chip" title={`${perGame.toFixed(2)} ${e.currency} ${tr("per game", "oyun başına")}`}>
+                        🔗 {shareList.length} {tr("games", "oyun")}
+                      </span>
+                    )}
+                    {showShareAffordance && (
+                      <button
+                        type="button"
+                        className="expense-share-toggle"
+                        onClick={() => setOpenId(isOpen ? null : e.id)}
+                      >
+                        {isOpen ? tr("Hide", "Gizle") : tr("Share", "Paylaş")}
+                      </button>
+                    )}
+                  </div>
+                  {showShareAffordance && isOpen && allGames && (
+                    <div className="expense-share-picker">
+                      <p className="expense-share-hint">
+                        {tr(
+                          "Pick games this overhead helps. Cost is split evenly across them.",
+                          "Bu giderin katkı yaptığı oyunları seç. Maliyet eşit bölüştürülür.",
+                        )}
+                      </p>
+                      <div className="expense-share-chips">
+                        {allGames.map((g) => (
+                          <button
+                            key={g.id}
+                            type="button"
+                            className={`expense-share-chip-btn${shareList.includes(g.id) ? " is-active" : ""}`}
+                            onClick={() => toggleGameShare(e, g.id)}
+                          >
+                            {g.title.length > 18 ? g.title.slice(0, 17) + "…" : g.title}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
+                <button
+                  className="icon-button expense-delete-btn"
+                  onClick={() => onDelete(e.id, gameId)}
+                >
+                  <Trash size={14} />
+                </button>
               </div>
-              <button
-                className="icon-button expense-delete-btn"
-                onClick={() => onDelete(e.id, gameId)}
-              >
-                <Trash size={14} />
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -204,8 +263,16 @@ function ExpenseDistribution({ expenses, rate, emptyLabel, distLabel }: Distribu
 export function Wallet() {
   const {
     games, globalExpenses, exchangeRates, activeCurrencies,
-    setActiveCurrencies, handleAddExpense, handleDeleteExpense, ui, language, general,
+    setActiveCurrencies, handleAddExpense, handleDeleteExpense, updateGlobalExpense,
+    ui, language, general,
   } = useAppStore();
+  // List passed to the per-row "share with games" picker on general
+  // expenses. We exclude the internal "General" marker game so users
+  // never see it as a target.
+  const shareableGames = useMemo(
+    () => games.filter((g) => !isGeneralGame(g)).map((g) => ({ id: g.id, title: g.title })),
+    [games],
+  );
   // Currency formatting now honours the user's "$ before" / "amount after"
   // preference from Settings → General. Falls back to the legacy "$N" form
   // when nothing is set so old screenshots still match.
@@ -400,6 +467,8 @@ export function Wallet() {
                       emptyLabel={noExpensesLabel}
                       rate={rate}
                       onDelete={(id, gid) => requestDelete(id, gid)}
+                      allGames={shareableGames}
+                      onUpdateGlobal={(id, patch) => void updateGlobalExpense(id, patch)}
                     />
                   </div>
                 </div>
@@ -435,7 +504,13 @@ export function Wallet() {
           <p className="eyebrow" style={{ marginBottom: "1rem" }}>{ui.wProjectExpEyebrow}</p>
           <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
             {games.filter((g) => !isGeneralGame(g)).map((g) => {
-              const spent = g.expenses.reduce((s, e) => s + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")), 0);
+              const directSpent = g.expenses.reduce((s, e) => s + calculateAccumulatedAmount(e, rate(e.currency ?? "USD")), 0);
+              // Add the per-game share of any shared general expenses
+              // (e.g. a $20 Claude Code subscription split across 4 games
+              // adds $5 here). Studio-level totals still count the full
+              // amount once, so we never double-count.
+              const sharedSpent = totalSharedSpendForGame(globalExpenses, g.id, rate);
+              const spent = directSpent + sharedSpent;
               const progress = g.budget && g.budget > 0 ? (spent / g.budget) * 100 : 0;
               const isExpanded = expandedId === g.id;
 

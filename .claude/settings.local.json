@@ -38,7 +38,16 @@
       "Bash(grep -n \"^\\\\.bg-main-pureBlack .toast {$\" src/styles.css)",
       "Bash(awk 'NR>=99 && NR<=285 { open+=gsub\\(/<div/,\"&\"\\); close+=gsub\\(/<\\\\/div>/,\"&\"\\); selfclose+=gsub\\(/<div[^>]*\\\\/>/,\"&\"\\) }; END { print \"open:\", open, \"close:\", close, \"self:\", selfclose }' src/components/modals/ProfileViewModal.tsx)",
       "Bash(grep -rln \"formatCurrency\\\\|toFixed.*USD\\\\|\\\\\\\\\\\\$ \" src/components/ src/lib/)",
-      "Bash(grep -n \"formatCurrency\\\\|\\\\\\\\\\\\$ \\\\|toFixed.*\\\\\\\\\\\\$\\\\|currency\" src/components/Wallet.tsx)"
+      "Bash(grep -n \"formatCurrency\\\\|\\\\\\\\\\\\$ \\\\|toFixed.*\\\\\\\\\\\\$\\\\|currency\" src/components/Wallet.tsx)",
+      "Bash(findstr -i \"note template\")",
+      "Bash(xxd)",
+      "Bash(awk 'BEGIN{RS=\"\"} /\\\\0/{found=1} END{print found}' \"C:/HereVexProgram/src/components/shared/MarkdownWorkspace.tsx\")",
+      "Bash(tr -d '\\\\000')",
+      "Read(//tmp/**)",
+      "Bash(cp /tmp/mwclean.tsx \"C:/HereVexProgram/src/components/shared/MarkdownWorkspace.tsx\" && file \"C:/HereVexProgram/src/components/shared/MarkdownWorkspace.tsx\")",
+      "Bash(echo \"exit=$?\")",
+      "Bash(node -e \"console.log\\(require\\('highlight.js/package.json'\\).version\\)\")",
+      "Bash(echo \"---TSC EXIT=$?\")"
     ]
   }
 }

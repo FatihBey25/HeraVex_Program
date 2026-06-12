@@ -271,7 +271,11 @@ interface AppStore {
     tags: string[];
     budget?: number;
   }) => Promise<GameRecord | null>;
-  handleSaveGame: (game: GameRecord, message?: string) => Promise<GameRecord>;
+  /** Saves a game through the IPC layer. Returns `null` when the save
+   *  fails — caller MUST check before treating the operation as a
+   *  success (e.g. closing modals, resetting forms). Errors surface as
+   *  toasts internally so call sites don't need their own try/catch. */
+  handleSaveGame: (game: GameRecord, message?: string) => Promise<GameRecord | null>;
   handleDeleteGame: (gameId: string) => Promise<void>;
 
   // ── task actions ───────────────────────────────────────────────────────────
@@ -329,6 +333,9 @@ interface AppStore {
   // ── expenses ───────────────────────────────────────────────────────────────
   handleAddExpense: (expense: ExpenseItem, gameId: string | null) => Promise<void>;
   handleDeleteExpense: (expenseId: string, gameId: string | null) => Promise<void>;
+  /** Patch a single global (studio-wide) expense — used for toggling
+   *  `sharedWithGameIds` from the wallet's general expense list. */
+  updateGlobalExpense: (expenseId: string, patch: Partial<ExpenseItem>) => Promise<void>;
 
   // ── settings / backup ─────────────────────────────────────────────────────
   handleSaveExchangeRates: (rates: Record<string, number>) => Promise<void>;
@@ -400,6 +407,39 @@ interface AppStore {
   handleClearAvatar: () => Promise<void>;
 }
 
+// ── FX rates helper (silent refresh) ───────────────────────────────
+//
+// Tries Frankfurter first, falls back to exchangerate.host. Both
+// providers ship USD-base rates as "1 USD = X CUR"; we invert to
+// "USD per CUR" so the rest of the codebase can multiply by amount.
+//
+// Errors are swallowed — the user keeps their last saved rates when
+// offline. dev-only console hint stays for debugging.
+async function refreshFxRatesFromInternet(
+  set: (s: Partial<AppStore>) => void,
+  get: () => AppStore,
+): Promise<void> {
+  // Rust-side fetch — bypasses the renderer's CSP allowlist and tries
+  // multiple providers (open.er-api.com / exchangerate.host / frankfurter).
+  // Frankfurter alone leaves TRY stuck on the fallback because the ECB
+  // dropped Turkish Lira from its reference feed in 2022.
+  try {
+    const next = await storage.fetchLiveExchangeRates();
+    if (next && typeof next === "object" && Object.keys(next).length >= 10) {
+      set({ exchangeRates: next });
+      await storage.saveExchangeRates(next).catch(() => null);
+      try {
+        localStorage.setItem("studiohub_rates_fetched_at", new Date().toISOString());
+      } catch { /* quota */ }
+      return;
+    }
+    if (import.meta.env.DEV) console.warn("[fx] thin payload, keeping cache");
+  } catch (err) {
+    if (import.meta.env.DEV) console.warn("[fx] tauri fetch failed:", err);
+  }
+  void get;
+}
+
 export const useAppStore = create<AppStore>((set, get) => ({
   games: [],
   globalExpenses: [],
@@ -452,6 +492,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setLanguage: async (lang) => {
     set({ language: lang, ui: copy[lang] });
+    // Mirror to localStorage so ErrorBoundary (which can't reach into
+    // Zustand during componentDidCatch) can render its recovery copy in
+    // the user's language. The disk-backed Tauri preference is still
+    // the source of truth — this is a synchronous shadow.
+    try { localStorage.setItem("heravex_lang", lang); } catch { /* quota */ }
     await storage.setPreferredLanguage(lang).catch(() => null);
   },
 
@@ -638,6 +683,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (savedLang && LANGUAGE_OPTIONS.includes(savedLang as AppLanguage)) {
         const lang = savedLang as AppLanguage;
         set({ language: lang, ui: copy[lang] });
+        // Mirror to localStorage so ErrorBoundary can read it sync.
+        try { localStorage.setItem("heravex_lang", lang); } catch { /* quota */ }
       } else {
         set({ showLanguagePrompt: true });
       }
@@ -699,26 +746,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // currencies like TRY. The disk-rehab block in `applyExchangeRatesFromDisk`
       // below catches that case for offline users on their first
       // upgrade run.
-      try {
-        const res = await fetch("https://api.frankfurter.app/latest?base=USD");
-        if (res.ok) {
-          const data = (await res.json()) as { rates: Record<string, number> };
-          const rates: Record<string, number> = { USD: 1 };
-          for (const [code, perUsd] of Object.entries(data.rates)) {
-            if (Number.isFinite(perUsd) && perUsd > 0) {
-              rates[code] = 1 / perUsd; // → USD per CUR
-            }
-          }
-          set({ exchangeRates: rates });
-          await storage.saveExchangeRates(rates).catch(() => null);
-          try {
-            localStorage.setItem("studiohub_rates_fetched_at", new Date().toISOString());
-          } catch {}
-          showToast(get().ui.wRatesUpdated, "success");
-        }
-      } catch {
-        // offline — keep saved rates silently
-      }
+      // Auto-fetch happens silently every launch. We try two endpoints
+      // so a single provider hiccup doesn't leave the user with stale
+      // rates. No toast — the spec is "user shouldn't notice".
+      void refreshFxRatesFromInternet(set, get).catch(() => null);
     } catch (err) {
       showToast(translateError(err, get().language), "error");
       set({ isLoading: false });
@@ -795,10 +826,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   handleSaveGame: async (game, message) => {
     const { showToast, applySavedGame } = get();
-    const saved = await storage.saveGame(game);
-    applySavedGame(saved);
-    if (message) showToast(message);
-    return saved;
+    try {
+      const saved = await storage.saveGame(game);
+      applySavedGame(saved);
+      if (message) showToast(message);
+      return saved;
+    } catch (err) {
+      showToast(translateError(err, get().language), "error");
+      return null;
+    }
   },
 
   handleDeleteGame: async (gameId) => {
@@ -1173,37 +1209,54 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   // ── expenses ───────────────────────────────────────────────────────────────
 
+  updateGlobalExpense: async (expenseId, patch) => {
+    const { globalExpenses } = get();
+    const next = globalExpenses.map((e) =>
+      e.id === expenseId ? { ...e, ...patch } : e,
+    );
+    await storage.saveGlobalExpenses(next);
+    set({ globalExpenses: next });
+  },
+
   handleAddExpense: async (expense, gameId) => {
     const { games, applySavedGame, globalExpenses, showToast, ui } = get();
-    if (gameId) {
-      const game = games.find((g) => g.id === gameId);
-      if (!game) return;
-      const saved = await storage.saveGame({ ...game, expenses: [expense, ...game.expenses] });
-      applySavedGame(saved);
-    } else {
-      const next = [expense, ...globalExpenses];
-      await storage.saveGlobalExpenses(next);
-      set({ globalExpenses: next });
+    try {
+      if (gameId) {
+        const game = games.find((g) => g.id === gameId);
+        if (!game) return;
+        const saved = await storage.saveGame({ ...game, expenses: [expense, ...game.expenses] });
+        applySavedGame(saved);
+      } else {
+        const next = [expense, ...globalExpenses];
+        await storage.saveGlobalExpenses(next);
+        set({ globalExpenses: next });
+      }
+      showToast(ui.expenseAdded);
+    } catch (err) {
+      showToast(translateError(err, get().language), "error");
     }
-    showToast(ui.expenseAdded);
   },
 
   handleDeleteExpense: async (expenseId, gameId) => {
     const { games, applySavedGame, globalExpenses, showToast, ui } = get();
-    if (gameId) {
-      const game = games.find((g) => g.id === gameId);
-      if (!game) return;
-      const saved = await storage.saveGame({
-        ...game,
-        expenses: game.expenses.filter((e) => e.id !== expenseId),
-      });
-      applySavedGame(saved);
-      showToast(ui.wExpenseDeleted, "success");
-    } else {
-      const next = globalExpenses.filter((e) => e.id !== expenseId);
-      await storage.saveGlobalExpenses(next);
-      set({ globalExpenses: next });
-      showToast(ui.wGeneralExpenseDeleted, "success");
+    try {
+      if (gameId) {
+        const game = games.find((g) => g.id === gameId);
+        if (!game) return;
+        const saved = await storage.saveGame({
+          ...game,
+          expenses: game.expenses.filter((e) => e.id !== expenseId),
+        });
+        applySavedGame(saved);
+        showToast(ui.wExpenseDeleted, "success");
+      } else {
+        const next = globalExpenses.filter((e) => e.id !== expenseId);
+        await storage.saveGlobalExpenses(next);
+        set({ globalExpenses: next });
+        showToast(ui.wGeneralExpenseDeleted, "success");
+      }
+    } catch (err) {
+      showToast(translateError(err, get().language), "error");
     }
   },
 

@@ -2029,12 +2029,71 @@ label span {
 }
 
 .dashboard-grid {
+  /* v0.9.7 — user-arranged panels. `auto-fit minmax` collapses
+     columns as panels are hidden so survivors expand to fill space.
+     The min was lowered from 360→300px on 2025-12 because the old
+     value forced laptop screens (1366px wide → ~1060px main pane)
+     into a 2×2 layout, which then made the tall recentGames panel
+     push the spendTrend / overview row down by 500+px — the user
+     read that as "the 4th panel falls below and bumps into the
+     games panel".
+     `--dash-min-col` lets the viewport hysteresis below override
+     the minimum on narrow displays without having to redeclare the
+     full grid rule. */
   display: grid;
-  grid-template-columns: 1.15fr 1fr 1fr;
-  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--dash-min-col, 300px) * var(--dash-scale, 1)), 1fr));
+  gap: calc(18px * var(--dash-scale, 1));
   min-height: 0;
   flex: 1;
+  align-items: start;
 }
+
+/* On narrow viewports drop the column minimum so 1366×768 laptops
+   fit 3 columns even with a default-width sidebar. The viewport-narrow
+   class is set by App.tsx's hysteresis monitor. */
+:root.viewport-narrow .dashboard-grid { --dash-min-col: 260px; }
+:root.viewport-very-narrow .dashboard-grid { --dash-min-col: 240px; }
+
+/* Cap the recentGames panel's body height to ~5 rows worth of game
+   cards. On narrow displays this drops to ~3 so the panel doesn't
+   tower over its row neighbours and force the second row miles
+   downscreen. The body scrolls when there are more items. */
+.panel-recent-games .dashboard-panel-body {
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+:root.viewport-narrow .panel-recent-games .dashboard-panel-body {
+  max-height: 320px;
+}
+
+/* Dashboard panel scale — driven by Settings → Layout → "Card height".
+   The root class is toggled in applyAppearanceToDom. `--dash-scale`
+   is the multiplier downstream rules apply to padding / chart sizes /
+   grid minmax. Type sizes stay constant on purpose; the existing
+   density-scale knob already covers typography. */
+:root.dash-card-short    { --dash-scale: 0.85; }
+:root.dash-card-standard { --dash-scale: 1.0; }
+:root.dash-card-tall     { --dash-scale: 1.18; }
+
+.dashboard-panel {
+  /* Override the generic `.panel` padding so the scale takes effect
+     for the dashboard surface only. Other panels (Wallet, Analytics)
+     keep their stock 20px. */
+  padding: calc(20px * var(--dash-scale, 1));
+  gap: calc(14px * var(--dash-scale, 1));
+}
+.dashboard-hero-stats {
+  gap: calc(14px * var(--dash-scale, 1));
+}
+.hero-stat-card {
+  padding: calc(16px * var(--dash-scale, 1)) calc(18px * var(--dash-scale, 1));
+}
+/* Chart heights are set inline by Recharts via the `height` prop on
+   ResponsiveContainer. We don't scale them here — the panel's
+   surrounding padding + the grid minmax already deliver a noticeable
+   visual scale. Touching chart heights forces an !important override
+   that fights Recharts' own layout logic. */
 
 .overview-card,
 .dashboard-list {
@@ -9279,7 +9338,11 @@ body.is-resizing {
   left: 0;
   right: 0;
   z-index: 30;
-  background: linear-gradient(180deg, rgba(17, 24, 36, 0.98), rgba(11, 17, 27, 0.96));
+  /* Fully opaque — the workspace switcher is a menu surface, not a
+     glass panel. The background MUST cover whatever sits behind it
+     so the panel never reads as "see-through". */
+  background: #111824;
+  background-image: linear-gradient(180deg, #131c2a, #0e1622);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   padding: 6px;
@@ -9287,6 +9350,17 @@ body.is-resizing {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* Theme override winners — the `:root[class*="bg-main-"]…` rule at
+   line ~350 ships every panel-ish surface a `--theme-surface` with
+   alpha (rgba 0.8) marked `!important`, which beats the plain rule
+   above. The workspace switcher is a MENU, not a translucent panel,
+   so it has to read as fully opaque regardless of active theme. */
+.sidebar-workspace-menu,
+:root[class*="bg-main-"] .sidebar-workspace-menu {
+  background: #111824 !important;
+  background-image: linear-gradient(180deg, #131c2a, #0e1622) !important;
 }
 
 .sidebar-ws-item {
@@ -9373,6 +9447,171 @@ body.is-resizing {
   height: 1px;
   margin: 6px 8px;
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Active workspace summary card (v0.9.7) ────────────────────── */
+.sidebar-ws-active-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 2px 2px 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(79, 140, 255, 0.10), rgba(79, 140, 255, 0.04));
+  border: 1px solid rgba(79, 140, 255, 0.22);
+}
+.sidebar-ws-active-card.is-team {
+  background: linear-gradient(180deg, rgba(167, 139, 250, 0.12), rgba(167, 139, 250, 0.04));
+  border-color: rgba(167, 139, 250, 0.28);
+}
+.sidebar-ws-active-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.sidebar-ws-active-icon {
+  margin-top: 3px;
+  color: #93c5fd;
+  flex-shrink: 0;
+}
+.sidebar-ws-active-card.is-team .sidebar-ws-active-icon { color: #c4b5fd; }
+.sidebar-ws-active-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.sidebar-ws-active-name {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #f4f7fb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.005em;
+}
+.sidebar-ws-active-path {
+  font-size: 10.5px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+}
+
+/* Tag row inside the active card. Each chip is uniformly shaped so
+   the row reads as a fact-strip rather than a button bar. */
+.sidebar-ws-active-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.sidebar-ws-mode-tag,
+.sidebar-ws-provider-tag,
+.sidebar-ws-stat-tag,
+.sidebar-ws-role-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.sidebar-ws-mode-tag.mode-local {
+  background: rgba(79, 140, 255, 0.16);
+  color: #bfdbfe;
+}
+.sidebar-ws-mode-tag.mode-team {
+  background: rgba(167, 139, 250, 0.20);
+  color: #ddd6fe;
+}
+.sidebar-ws-provider-tag {
+  background: rgba(167, 139, 250, 0.12);
+  color: #c4b5fd;
+}
+.sidebar-ws-stat-tag {
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+}
+.sidebar-ws-stat-tag svg { color: inherit; }
+.sidebar-ws-role-tag.role-leader {
+  background: rgba(245, 158, 11, 0.20);
+  color: #fcd34d;
+}
+.sidebar-ws-role-tag.role-leader svg { color: inherit; }
+.sidebar-ws-role-tag.role-member {
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+}
+.sidebar-ws-role-tag.role-banned {
+  background: rgba(248, 113, 113, 0.18);
+  color: #fca5a5;
+}
+
+/* Action row inside the active card. Two compact chips; disabled
+   state is used for the default workspace (no real path to copy/reveal). */
+.sidebar-ws-active-actions {
+  display: flex;
+  gap: 6px;
+}
+.sidebar-ws-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.sidebar-ws-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #f4f7fb;
+}
+.sidebar-ws-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sidebar-ws-action svg { color: inherit; }
+
+/* Two-line item rows — name + sub. The grid puts icon | text | dot,
+   so the sub line truncates inside the middle cell. */
+.sidebar-ws-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.sidebar-ws-item .sidebar-ws-sub {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sidebar-ws-item-workspace.is-active .sidebar-ws-sub { color: #cbd5e1; }
+
+/* Footer count line — sits at the very bottom of the dropdown. */
+.sidebar-ws-footer {
+  margin: 6px 4px 0;
+  padding: 6px 8px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  color: #64748b;
+  text-align: center;
+  letter-spacing: 0.02em;
 }
 
 /* ── New Workspace Modal ─────────────────────────────────────────────── */
@@ -13012,6 +13251,342 @@ select.input option {
 }
 .notes-textarea-wrap > textarea { flex: 1; }
 
+/* ── Dashboard hero greeting ───────────────────────────────────── */
+.dashboard-hero {
+  position: relative;
+  margin-bottom: 14px;
+  padding: 16px clamp(18px, 2.5vw, 28px);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 0% 0%, var(--accent-softer), transparent 50%),
+    radial-gradient(circle at 100% 100%, rgba(167, 139, 250, 0.16), transparent 55%),
+    linear-gradient(180deg, rgba(20, 28, 48, 0.55), rgba(13, 20, 33, 0.4));
+  border: 1px solid var(--accent-strong);
+  overflow: hidden;
+  display: grid;
+  /* Left column: greeting + headline + next-up card. Right column:
+     7-day completion strip. Auto-fit collapses to one column on
+     narrow viewports. v0.9.7 compact pass — was 28px padding +
+     center-aligned, now 16px + start-aligned. */
+  grid-template-columns: 1.5fr 1fr;
+  gap: clamp(14px, 2.5vw, 24px);
+  align-items: stretch;
+}
+@media (max-width: 920px) {
+  .dashboard-hero { grid-template-columns: 1fr; }
+}
+.dashboard-hero-left,
+.dashboard-hero-right {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.dashboard-hero-right {
+  justify-content: center;
+}
+.dashboard-hero-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dashboard-hero-date-inline {
+  color: #94a3b8;
+  font-weight: 600;
+  text-transform: capitalize;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.dashboard-hero.is-compact .dashboard-hero-title {
+  font-size: clamp(18px, 1.8vw, 24px);
+  margin: 2px 0 0;
+  line-height: 1.25;
+}
+.dashboard-hero::after {
+  content: "";
+  position: absolute;
+  top: -40%;
+  right: -10%;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-softer), transparent 70%);
+  pointer-events: none;
+}
+.dashboard-hero-text { position: relative; z-index: 1; }
+.dashboard-hero-eyebrow {
+  margin: 0 0 4px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 700;
+}
+.dashboard-hero-title {
+  margin: 0;
+  font-size: clamp(22px, 3vw, 32px);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  color: #f4f7fb;
+  max-width: 720px;
+}
+.dashboard-hero-sub {
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  color: #94a3b8;
+}
+.dashboard-hero-sub strong {
+  color: #f4f7fb;
+  font-weight: 700;
+}
+.dashboard-hero-cta-row {
+  position: relative;
+  z-index: 1;
+  margin-top: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.dashboard-hero-cta-primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.14s, box-shadow 0.14s;
+  box-shadow: 0 10px 24px -8px var(--accent-strong);
+}
+.dashboard-hero-cta-primary:hover { transform: translateY(-1px); }
+.dashboard-hero-cta-secondary {
+  background: transparent;
+  border: 1px solid var(--accent-strong);
+  color: var(--accent);
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.dashboard-hero-cta-secondary:hover {
+  background: var(--accent-softer);
+}
+
+/* ── Analytics: per-game P&L table ─────────────────────────────── */
+.roi-per-game {
+  margin-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 14px;
+}
+.roi-per-game-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.roi-per-game-head,
+.roi-per-game-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+  align-items: center;
+}
+.roi-per-game-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  padding-bottom: 4px;
+}
+.roi-per-game-row {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+}
+.roi-per-game-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.roi-per-game-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+/* ── Wallet shared-expense picker ──────────────────────────────── */
+.expense-share-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-softer);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.expense-share-toggle {
+  margin-left: auto;
+  font-size: 11px;
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  color: #94a3b8;
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+.expense-share-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.expense-share-picker {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+.expense-share-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+.expense-share-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.expense-share-chip-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: #c8d8e8;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.expense-share-chip-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.expense-share-chip-btn.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 700;
+}
+
+/* ── Calendar game-filter dropdown ─────────────────────────────── */
+/* Trigger lives inline in `.calendar-filter-chips` next to the other
+   chips. Popover is portaled into <body> so it escapes the calendar
+   header panel's `overflow: hidden` clipping. `position: fixed` +
+   computed top/right come from the trigger's bounding rect. */
+.calendar-game-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+}
+.calendar-game-menu-pop {
+  min-width: 220px;
+  max-height: 360px;
+  overflow-y: auto;
+  z-index: 1000;
+  padding: 6px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.97), rgba(13, 20, 33, 0.97));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 14px 42px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(14px);
+  animation: calendar-game-menu-in 0.13s ease-out;
+}
+@keyframes calendar-game-menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.calendar-game-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  color: #d7e3f3;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.13s ease;
+}
+.calendar-game-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.calendar-game-menu-item-active {
+  color: #ffffff;
+  background: rgba(79, 140, 255, 0.14);
+}
+.calendar-game-menu-item-active:hover {
+  background: rgba(79, 140, 255, 0.22);
+}
+.calendar-game-menu-check {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #7dc2ff;
+  flex-shrink: 0;
+}
+.calendar-game-menu-label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.calendar-game-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Calendar: softer borders pass (v0.9.7) ────────────────────── */
+.calendar-cell {
+  border-radius: 14px;
+  border-color: rgba(255, 255, 255, 0.035);
+  background: rgba(255, 255, 255, 0.018);
+}
+.calendar-cell-today {
+  border-color: rgba(79, 140, 255, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(79, 140, 255, 0.12);
+}
+.calendar-cell-milestone {
+  border-color: rgba(167, 139, 250, 0.22);
+}
+.calendar-cell-urgent {
+  border-color: rgba(248, 113, 113, 0.16);
+}
+.calendar-grid-wrapper {
+  border-radius: 16px;
+}
+.filter-chip {
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+.filter-chip-active {
+  border-color: rgba(79, 140, 255, 0.28);
+}
+
 /* ── Single-pane WYSIWYG editor (v0.9.x rewrite) ───────────────── */
 .notes-single-pane {
   flex: 1;
@@ -13597,5 +14172,1753 @@ select.input option {
   width: 22px; height: 22px;
   border-radius: 99px;
   border: 2px solid rgba(255, 255, 255, 0.10);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DASHBOARD v0.9.7 — user-arranged panels
+   Each panel shares the .dashboard-panel base; the .panel-<id>
+   modifiers add accent / spacing differences. The grid above uses
+   auto-fit so hidden panels reflow space to the rest.
+═══════════════════════════════════════════════════════════════ */
+
+.dashboard-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+  min-height: 0;
+}
+.dashboard-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dashboard-panel-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #f4f7fb;
+  letter-spacing: -0.005em;
+}
+.dashboard-panel-head .eyebrow {
+  margin: 0 0 2px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+.dashboard-panel-head-icon {
+  --ph-accent: #4f8cff;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--ph-accent);
+  background: color-mix(in srgb, var(--ph-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ph-accent) 28%, transparent);
+}
+.dashboard-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+/* ── Recent games (panel) ─────────────────────────────────────── */
+.game-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #94a3b8;
+}
+.game-row-meta .game-row-time { color: #cbd5e1; }
+.game-row-meta .game-row-task-count { color: #94a3b8; }
+
+/* ── Tasks at risk (panel) ────────────────────────────────────── */
+.panel-tasks-at-risk .dashboard-panel-body { gap: 14px; }
+
+.risk-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.risk-group-head {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #94a3b8;
+}
+.risk-group-head .risk-group-count {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d7e3f3;
+}
+.risk-group-overdue .risk-group-head { color: #fca5a5; }
+.risk-group-soon    .risk-group-head { color: #fcd34d; }
+.risk-group-later   .risk-group-head { color: #94a3b8; }
+.risk-group-icon { display: inline-flex; }
+
+.risk-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.risk-task-row {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.018);
+  border-radius: 12px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.13s;
+}
+.risk-task-row:hover {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+  transform: translateY(-1px);
+}
+.risk-task-row:active { transform: scale(0.99); }
+
+.risk-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+.risk-dot-priority-3 { background: #f87171; box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.18); }
+.risk-dot-priority-2 { background: #fbbf24; box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.15); }
+.risk-dot-priority-1 { background: #60a5fa; box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.14); }
+
+.risk-task-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.risk-task-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f4f7fb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.risk-task-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.risk-task-game {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.risk-task-priority {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.risk-task-chip {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-transform: lowercase;
+}
+.risk-task-chip-overdue { background: rgba(248, 113, 113, 0.16); color: #fca5a5; }
+.risk-task-chip-soon    { background: rgba(251, 191, 36, 0.16); color: #fcd34d; }
+.risk-task-chip-later   { background: rgba(148, 163, 184, 0.14); color: #cbd5e1; }
+
+/* ── Spend trend (panel) ──────────────────────────────────────── */
+.panel-spend-trend .dashboard-panel-head {
+  align-items: flex-start;
+}
+.spend-trend-totals {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+.spend-trend-total {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f4f7fb;
+  letter-spacing: -0.01em;
+}
+.spend-trend-delta {
+  font-size: 10.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.spend-trend-delta span { color: #94a3b8; }
+.spend-trend-chart-wrap {
+  margin: 4px -4px 0;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── Settings → Dashboard panels editor ───────────────────────── */
+.dashboard-panels-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+.dashboard-panels-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.dashboard-panels-hint-title {
+  margin: 0;
+  font-size: 12.5px;
+  color: #d7e3f3;
+}
+.dashboard-panels-hint-sub {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #94a3b8;
+}
+.dashboard-panels-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d7e3f3;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.dashboard-panels-reset:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.dashboard-panels-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.dashboard-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  cursor: grab;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.dashboard-panel-row:active { cursor: grabbing; }
+.dashboard-panel-row.is-disabled { opacity: 0.55; }
+.dashboard-panel-row.is-disabled .dashboard-panel-row-title { color: #94a3b8; }
+.dashboard-panel-row:hover {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+.dashboard-panel-handle {
+  display: inline-flex;
+  align-items: center;
+  color: #64748b;
+}
+.dashboard-panel-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.dashboard-panel-row-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f4f7fb;
+}
+.dashboard-panel-row-desc {
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+/* ── Mobile collapse — the auto-fit grid naturally falls to a single
+   column under 720px, but the spend-trend totals get cramped at the
+   header. Drop them onto their own row when the panel is narrow. */
+@media (max-width: 540px) {
+  .panel-spend-trend .dashboard-panel-head { flex-wrap: wrap; }
+  .spend-trend-totals { margin-left: 0; flex-direction: row; align-items: baseline; gap: 8px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TEAM WORKSPACES + MEMBERS (v0.9.7)
+═══════════════════════════════════════════════════════════════ */
+
+/* ── NewWorkspaceModal: kind chooser (step 1) ─────────────────── */
+.ws-kind-choices {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 18px;
+}
+.ws-kind-choice {
+  --c: #4f8cff;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s, transform 0.12s;
+  color: inherit;
+}
+.ws-kind-choice:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.ws-kind-choice.is-selected {
+  background: color-mix(in srgb, var(--c) 10%, transparent);
+  border-color: color-mix(in srgb, var(--c) 36%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 18%, transparent);
+}
+.ws-kind-choice-icon {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 14%, transparent);
+}
+.ws-kind-choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.ws-kind-choice-body strong { font-size: 14px; color: #f4f7fb; }
+.ws-kind-choice-body span { font-size: 11.5px; color: #94a3b8; }
+.ws-kind-choice-mark { color: var(--c); flex-shrink: 0; }
+
+.ws-kind-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 5px 10px;
+  border-radius: 999px;
+  width: max-content;
+  margin: 4px 0 14px;
+}
+.ws-kind-summary .link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ws-cloud-detected {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.14);
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  color: #ddd6fe;
+  font-size: 11px;
+}
+
+.ws-cloud-warn {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.22);
+}
+.ws-cloud-warn > svg { color: #fca5a5; flex-shrink: 0; margin-top: 2px; }
+.ws-cloud-warn strong { font-size: 12.5px; color: #fecaca; }
+.ws-cloud-warn p {
+  margin: 4px 0 8px;
+  font-size: 11.5px;
+  color: #cbd5e1;
+}
+.ws-cloud-override {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #f4f7fb;
+  cursor: pointer;
+}
+
+/* ── Sidebar: team folders section ────────────────────────────── */
+.sidebar-ws-team-section {
+  margin-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  padding-top: 6px;
+}
+.sidebar-ws-item-team {
+  position: relative;
+}
+.sidebar-ws-item-team svg:first-child { color: #c4b5fd; }
+.sidebar-ws-team-provider {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.16);
+  color: #ddd6fe;
+}
+
+/* ── Settings → Team Members panel ────────────────────────────── */
+.team-members-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+.team-members-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+}
+.team-members-count {
+  font-size: 12.5px;
+  color: #d7e3f3;
+}
+.team-members-role {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.team-members-role-leader  { background: rgba(245, 158, 11, 0.18); color: #fcd34d; }
+.team-members-role-member  { background: rgba(96, 165, 250, 0.16); color: #93c5fd; }
+.team-members-role-banned  { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
+
+.team-members-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.team-member-row {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.team-member-row:hover { background: rgba(255, 255, 255, 0.04); }
+.team-member-row.is-me {
+  background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.03));
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.team-member-row.team-member-role-banned {
+  opacity: 0.7;
+}
+.team-member-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+  font-weight: 700;
+  font-size: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.team-member-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.team-member-avatar.role-leader { border-color: rgba(245, 158, 11, 0.4); }
+.team-member-avatar.role-banned { border-color: rgba(248, 113, 113, 0.4); }
+
+.team-member-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.team-member-name {
+  font-size: 13.5px;
+  color: #f4f7fb;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.team-member-self-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: #cbd5e1;
+}
+.team-member-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: #94a3b8;
+}
+.team-member-role-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.team-member-role-tag.role-leader { background: rgba(245, 158, 11, 0.18); color: #fcd34d; }
+.team-member-role-tag.role-member { background: rgba(96, 165, 250, 0.16); color: #93c5fd; }
+.team-member-role-tag.role-banned { background: rgba(248, 113, 113, 0.18); color: #fca5a5; }
+
+.team-member-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.team-members-footnote {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #64748b;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RESPONSIVENESS PASS (v0.9.7)
+   1. Container queries on dashboard panels
+   2. Density-compact aggressive trimming
+   3. Viewport-narrow auto-collapse hooks (driven by App.tsx effect)
+   4. Sidebar drag handle styles (logic in Sidebar.tsx)
+   5. Fluid typography toggle (driven by Typography slice)
+═══════════════════════════════════════════════════════════════ */
+
+/* ── 1. Container queries: dashboard panels strip chrome at narrow
+   widths. Triggers on the PANEL's own width, not the viewport, so a
+   sidebar that grows / shrinks doesn't disturb panels that still
+   have plenty of room. */
+.dashboard-panel { container-type: inline-size; }
+@container (max-width: 340px) {
+  .dashboard-panel-head .eyebrow { display: none; }
+  .dashboard-panel-head h3 { font-size: 14.5px; }
+  .dashboard-panel-head-icon { width: 26px; height: 26px; border-radius: 8px; }
+  /* Risk-task rows collapse the dueChip to icon-only when there's
+     no headroom for both the title and the chip. */
+  .risk-task-chip { padding: 2px 6px; font-size: 9.5px; }
+  .game-row-meta .game-row-task-count { display: none; }
+}
+@container (max-width: 280px) {
+  .spend-trend-totals { display: none; }
+  .risk-task-priority { display: none; }
+}
+
+/* Same idea for hero stats — when the strip wraps to a single column
+   on narrow viewports, drop the subtext and shrink the icon. */
+.dashboard-hero-stats { container-type: inline-size; }
+@container (max-width: 360px) {
+  .hero-stat-subtext { display: none; }
+  .hero-stat-icon { width: 36px; height: 36px; }
+}
+
+/* ── 2. Density-compact aggressive mode. The previous behaviour
+   only scaled padding/gap (via --density-scale); the user sees a
+   noticeable but small change. The rules below remove decorative
+   chrome so compact actually buys vertical real estate. */
+:root.density-compact .eyebrow,
+:root.density-compact .dashboard-panel-head .eyebrow,
+:root.density-compact .panel-head .eyebrow,
+:root.density-compact .hero-stat-label,
+:root.density-compact .metric-label {
+  letter-spacing: 0.06em;
+  font-size: 9.5px;
+}
+:root.density-compact .hero-stat-card { padding: 12px 14px; }
+:root.density-compact .hero-stat-icon { width: 38px; height: 38px; }
+:root.density-compact .dashboard-panel { padding: 14px 16px; gap: 10px; }
+:root.density-compact .panel-head h3 { font-size: 14px; }
+:root.density-compact .dashboard-panel-head h3 { font-size: 15px; }
+:root.density-compact .game-row-meta .game-row-time { font-size: 10px; }
+:root.density-compact .risk-task-row { padding: 6px 8px; border-radius: 10px; }
+:root.density-compact .risk-task-title { font-size: 12.5px; }
+:root.density-compact .risk-task-meta { font-size: 10px; }
+:root.density-compact .sidebar-tab,
+:root.density-compact .nav-item { padding: 6px 8px; }
+:root.density-compact .settings-row { padding-top: 10px; padding-bottom: 10px; }
+
+/* Relaxed gives the opposite treatment — extra breathing room on
+   surfaces where the user opted into a roomier read. Mostly a no-op
+   at the class level because --density-scale handles the scaling,
+   but the heading sizes here ladder up so titles stay legible. */
+:root.density-relaxed .dashboard-panel { padding: 24px; gap: 18px; }
+:root.density-relaxed .panel-head h3 { font-size: 17px; }
+
+/* ── 3. Viewport-narrow auto-collapse. App.tsx adds these classes
+   under hysteresis (collapse at <1200px, expand at >1400px). The
+   sidebar drops to icon-only and the main padding tightens. */
+:root.viewport-narrow .shell {
+  --sidebar-width-effective: 64px;
+}
+:root.viewport-narrow .modern-sidebar {
+  width: 64px !important;
+  min-width: 64px !important;
+}
+:root.viewport-narrow .modern-sidebar:not(:hover) .nav-item-label,
+:root.viewport-narrow .modern-sidebar:not(:hover) .sidebar-tab-label,
+:root.viewport-narrow .modern-sidebar:not(:hover) .nav-section-eyebrow,
+:root.viewport-narrow .modern-sidebar:not(:hover) .modern-brand-text,
+:root.viewport-narrow .modern-sidebar:not(:hover) .sidebar-brand-caret,
+:root.viewport-narrow .modern-sidebar:not(:hover) .nav-item-chev {
+  display: none;
+}
+:root.viewport-narrow .modern-sidebar:not(:hover) .nav-item {
+  justify-content: center;
+  padding: 8px 0;
+}
+:root.viewport-narrow .modern-sidebar:hover {
+  width: var(--sidebar-width, 300px) !important;
+  z-index: 60;
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+}
+:root.viewport-very-narrow .dashboard-grid {
+  grid-template-columns: 1fr;
+}
+
+/* ── 4. Sidebar drag handle. A 4px hit-area at the right edge that
+   widens to 8px on hover. Logic lives in Sidebar.tsx; this is just
+   the visual + cursor surface. */
+.sidebar-drag-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  transition: background 0.15s;
+}
+.sidebar-drag-handle::after {
+  content: "";
+  width: 2px;
+  height: 28px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.sidebar-drag-handle:hover::after,
+.sidebar-drag-handle.is-dragging::after {
+  background: var(--accent-strong, rgba(167, 139, 250, 0.6));
+}
+.sidebar-drag-handle:hover { background: rgba(255, 255, 255, 0.04); }
+:root.is-resizing-sidebar { cursor: col-resize; user-select: none; }
+:root.is-resizing-sidebar * { cursor: col-resize !important; }
+
+/* ── 5. Fluid typography opt-in. Settings → Typography → "Auto-scale
+   with viewport" sets this class on root. We rebind --font-size-base
+   to a clamp() so font sizes track viewport width within the user's
+   configured min/max. The user's chosen baseSize becomes the upper
+   anchor; the lower anchor is 80% of it. The reference viewport is
+   1920px (anchor "as designed"). */
+:root.fluid-type {
+  --font-size-base: clamp(
+    calc(var(--font-size-base-user, 14px) * 0.82),
+    calc(var(--font-size-base-user, 14px) * 0.62 + 0.32vw),
+    var(--font-size-base-user, 14px)
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   NOTES EDITOR (v0.9.7 Tur 1)
+   Callouts, TOC side rail, and custom-template menu polish.
+═══════════════════════════════════════════════════════════════ */
+
+/* ── Callouts inside the editor surface ────────────────────────── */
+.notes-rich-editor .callout {
+  margin: 14px 0;
+  padding: 12px 16px;
+  border-left: 4px solid #4f8cff;
+  background: rgba(79, 140, 255, 0.08);
+  border-radius: 0 10px 10px 0;
+  color: #f4f7fb;
+}
+.notes-rich-editor .callout strong {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93c5fd;
+  margin-bottom: 4px;
+}
+.notes-rich-editor .callout p { margin: 0; color: #e2e8f0; }
+.notes-rich-editor .callout-warn {
+  border-left-color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+}
+.notes-rich-editor .callout-warn strong { color: #fcd34d; }
+.notes-rich-editor .callout-danger {
+  border-left-color: #f87171;
+  background: rgba(248, 113, 113, 0.08);
+}
+.notes-rich-editor .callout-danger strong { color: #fca5a5; }
+.notes-rich-editor .callout-ok {
+  border-left-color: #34d399;
+  background: rgba(52, 211, 153, 0.08);
+}
+.notes-rich-editor .callout-ok strong { color: #6ee7b7; }
+
+/* Callout button popover ── */
+.notes-toolbar-callout-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.notes-toolbar-callout-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 160px;
+  padding: 4px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(20, 28, 44, 0.97), rgba(13, 20, 33, 0.97));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(14px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.notes-toolbar-callout-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: #d7e3f3;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background 0.14s;
+}
+.notes-toolbar-callout-item:hover { background: rgba(255, 255, 255, 0.06); }
+.notes-toolbar-callout-item.tone-info svg   { color: #93c5fd; }
+.notes-toolbar-callout-item.tone-warn svg   { color: #fcd34d; }
+.notes-toolbar-callout-item.tone-danger svg { color: #fca5a5; }
+.notes-toolbar-callout-item.tone-ok svg     { color: #6ee7b7; }
+
+/* ── TOC side rail (v0.9.7) ────────────────────────────────────── */
+.notes-single-pane.has-toc {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "head head"
+    "editor toc";
+}
+.notes-single-pane.has-toc .notes-pane-head { grid-area: head; }
+.notes-single-pane.has-toc .notes-rich-editor { grid-area: editor; }
+.notes-single-pane.has-toc .notes-toc-rail { grid-area: toc; }
+.notes-toc-rail {
+  width: 240px;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 14px 14px 14px 18px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.12);
+}
+.notes-toc-rail-label {
+  margin: 0 0 8px;
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  color: #94a3b8;
+}
+.notes-toc-rail-empty {
+  margin: 0;
+  font-size: 11px;
+  color: #64748b;
+  font-style: italic;
+  line-height: 1.5;
+}
+.notes-toc-rail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.notes-toc-rail-list li.toc-level-2 { padding-left: 10px; }
+.notes-toc-rail-list li.toc-level-3 { padding-left: 22px; }
+.notes-toc-rail-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: #cbd5e1;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.13s, color 0.13s;
+}
+.notes-toc-rail-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #f4f7fb;
+}
+.notes-toc-rail-list li.toc-level-1 .notes-toc-rail-item { font-weight: 700; color: #f4f7fb; }
+.notes-toc-rail-list li.toc-level-3 .notes-toc-rail-item { color: #94a3b8; font-size: 11px; }
+@keyframes toc-flash {
+  0%   { background: var(--accent-soft, rgba(167, 139, 250, 0.2)); }
+  100% { background: transparent; }
+}
+.notes-rich-editor .toc-target-flash {
+  animation: toc-flash 1.2s ease-out;
+  border-radius: 6px;
+}
+
+/* ── Custom-template menu polish ───────────────────────────────── */
+.notes-template-menu-divider {
+  margin: 6px 4px 2px;
+  padding: 4px 8px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #64748b;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 8px;
+}
+.notes-template-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.notes-template-menu-row .notes-template-menu-item-custom { flex: 1; }
+.notes-template-menu-delete {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+.notes-template-menu-delete:hover {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fca5a5;
+}
+.notes-toolbar-template-save {
+  margin-left: 4px;
+}
+
+/* ── Code-block language picker — wider menu ───────────────────── */
+.notes-toolbar-codelang-menu {
+  min-width: 220px !important;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+/* ── Toggle list (<details>/<summary>) ─────────────────────────── */
+.notes-rich-editor .note-toggle {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+.notes-rich-editor .note-toggle > summary {
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  color: #f4f7fb;
+  padding: 2px 0 2px 4px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  outline: none;
+}
+.notes-rich-editor .note-toggle > summary::-webkit-details-marker { display: none; }
+.notes-rich-editor .note-toggle > summary::before {
+  content: "▸";
+  display: inline-block;
+  color: var(--accent);
+  width: 12px;
+  text-align: center;
+  transition: transform 0.16s;
+}
+.notes-rich-editor .note-toggle[open] > summary::before {
+  transform: rotate(90deg);
+}
+.notes-rich-editor .note-toggle > *:not(summary) {
+  margin-top: 8px;
+  padding-left: 20px;
+  color: #cbd5e1;
+}
+
+/* ── Code blocks (syntax highlighted) ──────────────────────────── */
+.notes-rich-editor .note-code {
+  position: relative;
+  margin: 14px 0;
+  padding: 32px 14px 14px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow-x: auto;
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.notes-rich-editor .note-code > code {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  display: block;
+  color: #f4f7fb;
+  font-family: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.notes-rich-editor .note-code-meta {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  user-select: none;
+  pointer-events: none;
+}
+.notes-rich-editor .note-code-copy {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.14s, color 0.14s, transform 0.12s;
+  border: 1px solid transparent;
+}
+.notes-rich-editor .note-code-copy:hover {
+  background: var(--accent);
+  color: #ffffff;
+}
+.notes-rich-editor .note-code-copy.is-copied {
+  background: rgba(52, 211, 153, 0.22);
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.36);
+}
+.notes-rich-editor .note-code-copy.is-copied::before {
+  content: "✓ ";
+}
+
+/* hljs token colours — tuned for the dark editor background. The
+   class names are emitted by highlight.js's stylesheet conventions;
+   we ship our own palette instead of pulling a 100kb hljs theme. */
+.notes-rich-editor .hljs              { color: #f4f7fb; }
+.notes-rich-editor .hljs-comment,
+.notes-rich-editor .hljs-quote        { color: #64748b; font-style: italic; }
+.notes-rich-editor .hljs-keyword,
+.notes-rich-editor .hljs-selector-tag,
+.notes-rich-editor .hljs-literal,
+.notes-rich-editor .hljs-built_in,
+.notes-rich-editor .hljs-type         { color: #c4b5fd; font-weight: 600; }
+.notes-rich-editor .hljs-string,
+.notes-rich-editor .hljs-symbol,
+.notes-rich-editor .hljs-bullet,
+.notes-rich-editor .hljs-attr,
+.notes-rich-editor .hljs-template-tag { color: #86efac; }
+.notes-rich-editor .hljs-number,
+.notes-rich-editor .hljs-meta,
+.notes-rich-editor .hljs-link         { color: #fbbf24; }
+.notes-rich-editor .hljs-title,
+.notes-rich-editor .hljs-section,
+.notes-rich-editor .hljs-function .hljs-title,
+.notes-rich-editor .hljs-class .hljs-title { color: #7dd3fc; font-weight: 600; }
+.notes-rich-editor .hljs-variable,
+.notes-rich-editor .hljs-property,
+.notes-rich-editor .hljs-attribute,
+.notes-rich-editor .hljs-params       { color: #fca5a5; }
+.notes-rich-editor .hljs-tag,
+.notes-rich-editor .hljs-selector-class,
+.notes-rich-editor .hljs-selector-id  { color: #93c5fd; }
+.notes-rich-editor .hljs-regexp       { color: #f9a8d4; }
+.notes-rich-editor .hljs-deletion     { color: #fca5a5; background: rgba(248, 113, 113, 0.1); }
+.notes-rich-editor .hljs-addition     { color: #6ee7b7; background: rgba(52, 211, 153, 0.1); }
+.notes-rich-editor .hljs-emphasis     { font-style: italic; }
+.notes-rich-editor .hljs-strong       { font-weight: 700; }
+
+/* ── Inline database tables (v0.9.7) ───────────────────────────── */
+.notes-rich-editor .note-db {
+  margin: 14px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+.note-db-inner { display: flex; flex-direction: column; }
+.note-db-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+}
+.note-db-name {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: #f4f7fb;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  outline: none;
+  padding: 2px 4px;
+}
+.note-db-name:focus {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 4px;
+}
+.note-db-head-actions { display: inline-flex; gap: 6px; }
+.note-db-head-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s;
+}
+.note-db-head-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.note-db-head-btn.primary {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: transparent;
+}
+.note-db-head-btn.primary:hover { filter: brightness(1.1); }
+
+.note-db-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.note-db-th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  vertical-align: top;
+}
+.note-db-col-name {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #f4f7fb;
+  text-transform: uppercase;
+  padding: 2px 0;
+  outline: none;
+}
+.note-db-col-name:focus {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+}
+.note-db-col-meta {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  align-items: center;
+}
+.note-db-col-type {
+  flex: 1;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  color: #cbd5e1;
+  font-size: 10px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+}
+.note-db-col-delete {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.note-db-col-delete:hover {
+  background: rgba(248, 113, 113, 0.18);
+  color: #fca5a5;
+}
+
+.note-db-td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  vertical-align: top;
+}
+.note-db-cell-input {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #f4f7fb;
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  outline: none;
+  font-family: inherit;
+}
+.note-db-cell-input:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.note-db-cell-input:focus {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(167, 139, 250, 0.4);
+}
+.note-db-td.type-number .note-db-cell-input { text-align: right; font-variant-numeric: tabular-nums; }
+.note-db-td.type-date .note-db-cell-input { font-variant-numeric: tabular-nums; }
+.note-db-td.type-select .note-db-cell-input,
+.note-db-td.type-tag .note-db-cell-input,
+.note-db-th .note-db-col-type {
+  font-family: inherit;
+}
+
+.note-db-tag-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  padding: 2px;
+}
+.note-db-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.18);
+  color: #ddd6fe;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.note-db-tag-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  opacity: 0.7;
+}
+.note-db-tag-remove:hover { opacity: 1; }
+.note-db-tag-add {
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  background: transparent;
+  color: #94a3b8;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  cursor: pointer;
+  outline: none;
+}
+
+.note-db-row-actions {
+  width: 28px;
+  padding: 4px 4px;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.note-db-row-delete {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.note-db-row-delete:hover {
+  background: rgba(248, 113, 113, 0.18);
+  color: #fca5a5;
+}
+
+.note-db-foot {
+  padding: 6px 12px;
+  font-size: 10.5px;
+  color: #64748b;
+  background: rgba(255, 255, 255, 0.018);
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  letter-spacing: 0.02em;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DASHBOARD HERO DETAILS (v0.9.7)
+   Focal-game card + date pill + 7-day activity sparkline. The hero
+   itself was upgraded to a 2-column grid above (line ~13265).
+═══════════════════════════════════════════════════════════════ */
+
+/* ── Studio report card on the left column (v0.9.7) ────────────
+   Compact "studio identity" surface that lives in the hero. Pulls
+   from Studio Identity + workspace state. Clicking the whole card
+   opens Settings → Studio so the user can tune the brand. */
+.dashboard-hero-studio {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  max-width: 520px;
+  transition: background 0.16s, border-color 0.16s, transform 0.12s;
+}
+.dashboard-hero-studio:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.14);
+  transform: translateY(-1px);
+}
+.dashboard-hero-studio:active { transform: scale(0.995); }
+.dashboard-hero-studio-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 11px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.dashboard-hero-studio-logo-placeholder {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  border: none;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+.dashboard-hero-studio-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+.dashboard-hero-studio-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.dashboard-hero-studio-name {
+  font-size: 14px;
+  color: #f4f7fb;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.dashboard-hero-studio-tag {
+  font-size: 10.5px;
+  color: #94a3b8;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 4 mini stats laid out as a row. Each stat is its own pill so a
+   tight viewport can wrap the row gracefully without breaking the
+   numeric pairing. */
+.dashboard-hero-studio-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dashboard-hero-studio-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 10.5px;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+.dashboard-hero-studio-stat svg { color: var(--accent); flex-shrink: 0; }
+.dashboard-hero-studio-stat strong {
+  color: #f4f7fb;
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Shared pill helper for empty / single-line cards ─────────── */
+.dashboard-hero-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  font-size: 12.5px;
+  width: max-content;
+  max-width: 100%;
+}
+.dashboard-hero-pill svg { color: var(--accent); flex-shrink: 0; }
+.dashboard-hero-pill-success {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.22);
+  background: rgba(52, 211, 153, 0.05);
+}
+.dashboard-hero-pill-success svg { color: #34d399; }
+
+/* ── Next-up card (sirada) ─────────────────────────────────────── */
+.dashboard-hero-nextup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  max-width: 520px;
+  transition: background 0.16s, border-color 0.16s, transform 0.12s;
+}
+.dashboard-hero-nextup:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.14);
+  transform: translateY(-1px);
+}
+.dashboard-hero-nextup.tone-overdue { border-color: rgba(248, 113, 113, 0.32); background: rgba(248, 113, 113, 0.06); }
+.dashboard-hero-nextup.tone-urgent  { border-color: rgba(251, 191, 36, 0.32); background: rgba(251, 191, 36, 0.05); }
+.dashboard-hero-nextup-dot {
+  width: 10px; height: 10px; border-radius: 999px; flex-shrink: 0;
+  background: #93c5fd;
+}
+.dashboard-hero-nextup-dot.dot-overdue { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.22); }
+.dashboard-hero-nextup-dot.dot-urgent  { background: #fbbf24; box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.22); }
+.dashboard-hero-nextup-body { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.dashboard-hero-nextup-body strong {
+  font-size: 13.5px; color: #f4f7fb;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dashboard-hero-nextup-label {
+  font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: #94a3b8; font-weight: 700;
+}
+.dashboard-hero-nextup.tone-overdue .dashboard-hero-nextup-label { color: #fca5a5; }
+.dashboard-hero-nextup.tone-urgent  .dashboard-hero-nextup-label { color: #fcd34d; }
+.dashboard-hero-nextup-meta {
+  font-size: 10.5px; color: #94a3b8;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dashboard-hero-nextup-chev { color: #94a3b8; flex-shrink: 0; }
+
+/* ── Pomodoro card ─────────────────────────────────────────────── */
+.dashboard-hero-pomo {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  max-width: 520px;
+  transition: background 0.16s, border-color 0.16s;
+}
+.dashboard-hero-pomo:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.14); }
+.dashboard-hero-pomo.phase-focus      { border-color: rgba(167, 139, 250, 0.32); background: rgba(167, 139, 250, 0.06); }
+.dashboard-hero-pomo.phase-shortBreak { border-color: rgba(96, 165, 250, 0.32);  background: rgba(96, 165, 250, 0.05); }
+.dashboard-hero-pomo.phase-longBreak  { border-color: rgba(52, 211, 153, 0.32);  background: rgba(52, 211, 153, 0.05); }
+.dashboard-hero-pomo-icon {
+  width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center;
+  background: rgba(255, 255, 255, 0.06); color: #f4f7fb; flex-shrink: 0;
+}
+.dashboard-hero-pomo.is-running .dashboard-hero-pomo-icon { background: var(--accent-strong); color: #ffffff; }
+.dashboard-hero-pomo-body { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.dashboard-hero-pomo-label { font-size: 9.5px; letter-spacing: 0.12em; color: #94a3b8; font-weight: 700; }
+.dashboard-hero-pomo-time {
+  font-size: 22px; font-weight: 700; color: #f4f7fb;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.01em; line-height: 1.05;
+}
+.dashboard-hero-pomo-sub { font-size: 10.5px; color: #94a3b8; }
+
+/* ── Quick capture card ────────────────────────────────────────── */
+.dashboard-hero-capture {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 6px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  width: 100%;
+  max-width: 520px;
+}
+.dashboard-hero-capture-kind {
+  display: inline-flex;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 2px;
+  gap: 2px;
+}
+.dashboard-hero-capture-kind-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: none; background: transparent;
+  color: #94a3b8; padding: 4px 8px; font-size: 11px; font-weight: 600;
+  cursor: pointer; border-radius: 6px;
+}
+.dashboard-hero-capture-kind-btn.is-active { background: var(--accent-strong); color: #ffffff; }
+.dashboard-hero-capture-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: #f4f7fb;
+  font-size: 13px;
+  padding: 4px 8px;
+  outline: none;
+  min-width: 0;
+}
+.dashboard-hero-capture-input::placeholder { color: #64748b; }
+.dashboard-hero-capture-submit {
+  display: grid; place-items: center;
+  width: 28px; height: 28px; border-radius: 8px;
+  border: none; background: var(--accent); color: #ffffff;
+  cursor: pointer; transition: opacity 0.14s;
+}
+.dashboard-hero-capture-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Release countdown card ────────────────────────────────────── */
+.dashboard-hero-release {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  width: 100%;
+  max-width: 520px;
+}
+.dashboard-hero-release-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 9.5px; letter-spacing: 0.12em; font-weight: 700;
+  color: #c4b5fd;
+}
+.dashboard-hero-release-list { display: flex; flex-direction: column; gap: 4px; }
+.dashboard-hero-release-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s;
+}
+.dashboard-hero-release-row:hover { background: rgba(255, 255, 255, 0.05); }
+.dashboard-hero-release-days {
+  display: inline-flex; align-items: baseline; gap: 1px;
+  font-size: 11px; color: #c4b5fd; font-variant-numeric: tabular-nums;
+}
+.dashboard-hero-release-days strong { font-size: 15px; color: #ddd6fe; }
+.dashboard-hero-release-title {
+  font-size: 12.5px; color: #f4f7fb;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dashboard-hero-release-game { font-size: 10.5px; color: #94a3b8; white-space: nowrap; }
+
+/* ── Today micro-stats card ────────────────────────────────────── */
+.dashboard-hero-micro {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  width: 100%;
+  max-width: 520px;
+}
+.dashboard-hero-micro-label {
+  font-size: 9.5px; letter-spacing: 0.12em; font-weight: 700; color: #94a3b8;
+}
+.dashboard-hero-micro-stats { display: flex; gap: 18px; flex-wrap: wrap; }
+.dashboard-hero-micro-stat {
+  display: flex; align-items: center; gap: 6px;
+  color: #94a3b8; font-size: 11px;
+}
+.dashboard-hero-micro-stat svg { color: var(--accent); }
+.dashboard-hero-micro-stat strong {
+  font-size: 18px; color: #f4f7fb; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* ── Today's goal card ─────────────────────────────────────────── */
+.dashboard-hero-goal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  width: 100%;
+  max-width: 520px;
+}
+.dashboard-hero-goal-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 9.5px; letter-spacing: 0.12em; font-weight: 700; color: #94a3b8;
+}
+.dashboard-hero-goal-label svg { color: var(--accent); }
+.dashboard-hero-goal-input {
+  border: none; background: transparent; outline: none;
+  color: #f4f7fb; font-size: 14px; font-weight: 600;
+  padding: 2px 0;
+}
+.dashboard-hero-goal-input::placeholder { color: #64748b; font-weight: 400; }
+
+/* ── Pinned shortcuts (recent games) ───────────────────────────── */
+.dashboard-hero-pins {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 520px;
+}
+.dashboard-hero-pins-label {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 9.5px; letter-spacing: 0.12em; font-weight: 700; color: #94a3b8;
+}
+.dashboard-hero-pins-label svg { color: var(--accent); }
+.dashboard-hero-pins-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+}
+.dashboard-hero-pin {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.14s, border-color 0.14s, transform 0.12s;
+}
+.dashboard-hero-pin:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+  transform: translateY(-1px);
+}
+.dashboard-hero-pin-thumb {
+  width: 24px; height: 24px; border-radius: 6px;
+  object-fit: cover; flex-shrink: 0;
+}
+.dashboard-hero-pin-placeholder {
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #ffffff; font-weight: 700; font-size: 11px;
+}
+.dashboard-hero-pin-name {
+  font-size: 11.5px; color: #f4f7fb;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ── 7-day completion sparkline (compact form on right column) ── */
+.dashboard-hero-activity {
+  width: 100%;
+  max-width: 340px;
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.dashboard-hero-activity-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.dashboard-hero-activity-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #94a3b8;
+}
+.dashboard-hero-activity-total {
+  font-size: 16px;
+  font-weight: 700;
+  color: #f4f7fb;
+  letter-spacing: -0.01em;
+}
+.dashboard-hero-activity-bars {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  align-items: end;
+  gap: 5px;
+  height: 36px;
+}
+.dashboard-hero-activity-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  height: 100%;
+  justify-content: flex-end;
+}
+.dashboard-hero-activity-bar {
+  width: 100%;
+  max-width: 14px;
+  border-radius: 4px 4px 2px 2px;
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 55%, transparent));
+  min-height: 4px;
+  transition: opacity 0.16s;
+}
+.dashboard-hero-activity-bar.is-empty {
+  background: rgba(255, 255, 255, 0.06);
+}
+.dashboard-hero-activity-tick {
+  font-size: 9px;
+  color: #64748b;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 920px) {
+  .dashboard-hero-activity { max-width: 100%; margin-left: 0; }
 }
 

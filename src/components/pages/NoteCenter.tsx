@@ -216,7 +216,10 @@ export function NoteCenter() {
         setNotes(list);
         if (list.length > 0) {
           setSelection({ kind: "global", noteId: list[0].id });
-        } else if (games.length > 0) {
+        } else if (games[0]?.id) {
+          // Optional chaining defends against race conditions where the
+          // store's `games` slice may be momentarily empty between hydrate
+          // and refreshGames.
           setSelection({ kind: "project", gameId: games[0].id });
         }
       } catch (err) {
@@ -403,7 +406,10 @@ export function NoteCenter() {
       if (selection?.kind === "global" && selection.noteId === idToRemove) {
         if (remaining.length > 0) {
           setSelection({ kind: "global", noteId: remaining[0].id });
-        } else if (games.length > 0) {
+        } else if (games[0]?.id) {
+          // Optional chaining defends against race conditions where the
+          // store's `games` slice may be momentarily empty between hydrate
+          // and refreshGames.
           setSelection({ kind: "project", gameId: games[0].id });
         } else {
           setSelection(null);
@@ -416,19 +422,38 @@ export function NoteCenter() {
   };
 
   const exportPdf = async () => {
+    // v0.9.7 PDF rewrite: browser-print path. The legacy Rust pipeline
+    // (`exportGlobalNotePdf` / `exportNotesPdf`) rendered through
+    // printpdf's BuiltinFont::Helvetica which is Latin-1 only — every
+    // Turkish character came out broken — and the markdown renderer
+    // didn't understand the HTML the editor stores now. The new path
+    // opens a hidden iframe with print-tuned CSS, calls window.print(),
+    // and lets the user "Save as PDF" from the OS dialog. UTF-8 just
+    // works, and the styling is fully editable in CSS.
     try {
+      const { exportNoteAsPdf } = await import("../../lib/notePdfExport");
       if (activeNote) {
         if (draft !== activeNote.content || draftTitle !== activeNote.title) {
           await persistGlobal({ ...activeNote, content: draft, title: draftTitle || activeNote.title });
         }
-        const path = await exportGlobalNotePdf(activeNote.id);
-        showToast(tr(`Note exported to ${path}`, `Not dışa aktarıldı: ${path}`), "success");
+        await exportNoteAsPdf(draft, {
+          title: draftTitle || activeNote.title,
+          subtitle: activeNote.category ?? undefined,
+          eyebrow: tr("HERAVEX · STUDIO NOTE", "HERAVEX · STÜDYO NOTU"),
+          meta: tr("Studio Knowledge Base", "Stüdyo Bilgi Tabanı"),
+        }, language);
+        showToast(tr("Print dialog opened — choose Save as PDF.", "Yazdırma penceresi açıldı — PDF olarak kaydet seç."), "success");
       } else if (activeGame) {
         if (draft !== (activeGame.notes ?? "")) {
           await persistProject({ ...activeGame, notes: draft });
         }
-        const path = await exportNotesPdf(activeGame.id);
-        showToast(tr(`GDD exported to ${path}`, `GDD dışa aktarıldı: ${path}`), "success");
+        await exportNoteAsPdf(draft, {
+          title: activeGame.title,
+          subtitle: `${tr("Status", "Durum")}: ${activeGame.status}`,
+          eyebrow: tr("HERAVEX · GAME DESIGN DOCUMENT", "HERAVEX · GAME DESIGN DOCUMENT"),
+          meta: (activeGame.platforms || []).join(" · ") || tr("No platforms set", "Platform yok"),
+        }, language);
+        showToast(tr("Print dialog opened — choose Save as PDF.", "Yazdırma penceresi açıldı — PDF olarak kaydet seç."), "success");
       }
     } catch (err) {
       const msg = String(err);
@@ -698,6 +723,7 @@ export function NoteCenter() {
                 onExportPdf={exportPdf}
                 templateLabel={tr("Use Template", "Şablon Kullan")}
                 exportLabel={tr("Export PDF", "PDF Olarak Dışa Aktar")}
+                customTemplateScope={activeNote ? "global" : activeGame ? `game-${activeGame.id}` : undefined}
               />
             </div>
           )}

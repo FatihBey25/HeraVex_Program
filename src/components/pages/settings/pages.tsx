@@ -23,7 +23,10 @@ import { SettingGroup } from "./rows/SettingGroup";
 import { SettingRow } from "./rows/SettingRow";
 import { Toggle, PillGroup, Dropdown, SliderRow, CompactButton, TextInput, TextArea, ChipInput, KeyComboButton, PasswordInput } from "./rows/controls";
 import { AccentSwatchGrid, ColorDot } from "./rows/swatches";
-import { ACCENT_PRESETS } from "../../../lib/appearance";
+import { ACCENT_PRESETS, DEFAULT_DASHBOARD_PANELS, type DashboardPanelEntry, type DashboardPanelId, type DashboardHeroCard, type LayoutSlice } from "../../../lib/appearance";
+import { detectCloudProvider } from "../../../lib/workspaces";
+import { Reorder } from "framer-motion";
+import { GripVertical, RotateCcw } from "lucide-react";
 import {
   ENGINE_OPTIONS, EXPERIENCE_OPTIONS, LANGUAGE_OPTIONS, ROLE_OPTIONS,
   type EngineId, type ExperienceLevel, type RoleId, type LanguageId,
@@ -51,7 +54,7 @@ import {
   findShortcutConflicts, formatCombo, loadShortcuts, resetShortcuts, saveShortcuts,
   type ShortcutAction, type ShortcutDef,
 } from "../../../lib/shortcutConfig";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { SettingsSection } from "./sections";
 
 /** A throwaway "this control will be wired up later" chip. Sits in
@@ -848,6 +851,25 @@ function TypographyPage() {
           }
         />
         <SettingRow
+          title={(useAppStore.getState().language === "tr") ? "Otomatik ekran ölçekleme"
+            : (useAppStore.getState().language === "fr") ? "Échelle auto selon l'écran"
+            : (useAppStore.getState().language === "es") ? "Escala automática por pantalla"
+            : "Auto-scale with viewport"}
+          description={(useAppStore.getState().language === "tr")
+            ? "Yazı boyutu, daha küçük ekranlarda yumuşakça düşer. Üst sınır yukarıdaki temel boyut."
+            : (useAppStore.getState().language === "fr")
+            ? "La taille diminue progressivement sur les petits écrans. Plafond : la taille de base ci-dessus."
+            : (useAppStore.getState().language === "es")
+            ? "El tamaño baja suavemente en pantallas pequeñas. Tope: el tamaño base de arriba."
+            : "Font sizes shrink gradually on smaller displays. Upper bound = base size above."}
+          control={
+            <Toggle
+              checked={t.autoScale === true}
+              onChange={(v) => setTypography({ autoScale: v })}
+            />
+          }
+        />
+        <SettingRow
           title={ui.typeEditorSize}
           control={
             <SliderRow
@@ -929,7 +951,6 @@ function TypographyPage() {
 function LayoutPage() {
   const { ui, language, layout, setLayout, resetLayout } = useAppStore();
   const l = layout;
-  const defaultWidgets = { overview: true, projects: true, tasks: true };
   return (
     <>
       <SettingGroup label={ui.layoutGroupDensity}>
@@ -1132,36 +1153,8 @@ function LayoutPage() {
       </SettingGroup>
 
       <SettingGroup label={language === "tr" ? "Dashboard panelleri" : "Dashboard panels"}>
-        <SettingRow
-          title={language === "tr" ? "Genel bakış paneli" : "Overview panel"}
-          description={language === "tr" ? "Toplam harcama, oranlar, harcama grafiği." : "Total spend, ratios, spend-by-project chart."}
-          control={
-            <Toggle
-              checked={(l.dashboardWidgets ?? defaultWidgets).overview}
-              onChange={(v) => setLayout({ dashboardWidgets: { ...(l.dashboardWidgets ?? defaultWidgets), overview: v } })}
-            />
-          }
-        />
-        <SettingRow
-          title={language === "tr" ? "Projeler paneli" : "Projects panel"}
-          description={language === "tr" ? "Son projeler ve ilerleme çubukları." : "Recent projects with progress bars."}
-          control={
-            <Toggle
-              checked={(l.dashboardWidgets ?? defaultWidgets).projects}
-              onChange={(v) => setLayout({ dashboardWidgets: { ...(l.dashboardWidgets ?? defaultWidgets), projects: v } })}
-            />
-          }
-        />
-        <SettingRow
-          title={language === "tr" ? "Görev paneli" : "Tasks panel"}
-          description={language === "tr" ? "Öncelikli bekleyen görevler." : "High-priority pending tasks."}
-          control={
-            <Toggle
-              checked={(l.dashboardWidgets ?? defaultWidgets).tasks}
-              onChange={(v) => setLayout({ dashboardWidgets: { ...(l.dashboardWidgets ?? defaultWidgets), tasks: v } })}
-            />
-          }
-        />
+        <DashboardHeroCardRow language={language} layout={l} setLayout={setLayout} />
+        <DashboardPanelsRow language={language} layout={l} setLayout={setLayout} />
       </SettingGroup>
 
       <SettingGroup label={ui.layoutGroupReset}>
@@ -1480,6 +1473,15 @@ function KeyboardPage() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
       console.warn("[shortcuts] export failed:", err);
+      const lang = useAppStore.getState().language;
+      const msg = lang === "tr"
+        ? "Kısayollar dışa aktarılamadı."
+        : lang === "fr"
+        ? "Échec de l'export des raccourcis."
+        : lang === "es"
+        ? "No se pudieron exportar los atajos."
+        : "Shortcut export failed.";
+      useAppStore.getState().showToast(msg, "error");
     }
   };
 
@@ -2256,7 +2258,7 @@ function SyncStatusRow() {
 }
 
 function TeamModePage() {
-  const { ui, teamMode, setTeamMode, showToast, showError, refreshGames } = useAppStore();
+  const { ui, teamMode, setTeamMode, language, showToast, showError, refreshGames } = useAppStore();
   const [workspacePath, setWorkspacePathState] = useState<string>("");
   const [busy, setBusy] = useState(false);
 
@@ -2269,11 +2271,33 @@ function TeamModePage() {
     })();
   }, []);
 
+  // Cloud-vs-local check on pick. The previous flow accepted any
+  // directory, so a user clicking "Team mode" and pointing at a desktop
+  // folder would silently enable team mode against a non-syncing
+  // location. The detection here is the same heuristic the
+  // NewWorkspaceModal uses; when it returns null we ask the user
+  // explicitly to confirm via window.confirm before continuing — a
+  // proper dialog would be nicer but window.confirm is acceptable
+  // until we add a reusable settings-page confirm modal.
   const pickWorkspace = async () => {
     setBusy(true);
     try {
       const dir = await pickDirectory();
       if (dir) {
+        const provider = detectCloudProvider(dir);
+        if (!provider) {
+          const msg = language === "tr"
+            ? "Bu klasör bir bulut-senk klasörü gibi görünmüyor. Ekiple paylaşımlı çalışmak için OneDrive / Dropbox / iCloud / Google Drive içindeki bir klasör seçmen önerilir. Yine de bu klasörle devam etmek istiyor musun?"
+            : language === "fr"
+            ? "Ce dossier ne ressemble pas à un dossier cloud. Pour partager avec une équipe, utilisez un dossier OneDrive / Dropbox / iCloud / Google Drive. Continuer quand même ?"
+            : language === "es"
+            ? "Esta carpeta no parece estar en la nube. Para compartir con un equipo, usa una carpeta de OneDrive / Dropbox / iCloud / Google Drive. ¿Continuar de todos modos?"
+            : "This folder doesn't look like a cloud-synced folder. To share with a team, point at a folder inside OneDrive / Dropbox / iCloud / Google Drive. Continue anyway?";
+          if (!window.confirm(msg)) {
+            setBusy(false);
+            return;
+          }
+        }
         await setWorkspacePath(dir);
         setWorkspacePathState(dir);
         await refreshGames();
@@ -2383,12 +2407,230 @@ function TeamModePage() {
         />
       </SettingGroup>
 
+      <SettingGroup label={language === "tr" ? "Ekip üyeleri"
+        : language === "fr" ? "Membres de l'équipe"
+        : language === "es" ? "Miembros del equipo"
+        : "Team members"}>
+        <TeamMembersPanel workspacePath={workspacePath} language={language} />
+      </SettingGroup>
+
       <SettingGroup label={ui.teamModeGroupInfo}>
         <SettingRow title={ui.teamModeInfoAtomic}   description={ui.teamModeInfoAtomicDesc} />
         <SettingRow title={ui.teamModeInfoWatcher}  description={ui.teamModeInfoWatcherDesc} />
         <SettingRow title={ui.teamModeInfoActivity} description={ui.teamModeInfoActivityDesc} />
       </SettingGroup>
     </>
+  );
+}
+
+/** Members panel for the active team workspace. Reads the on-disk
+ *  members file on mount and on the cross-component
+ *  `heravex:team-members-changed` event. Renders a header + a list of
+ *  member rows; leader-only actions (promote, demote, ban, remove)
+ *  appear next to the row only when the current user is the leader.
+ *
+ *  Local / non-team workspaces show a hint that switching to a team
+ *  folder is required — the same flow as picking a workspace above.
+ */
+function TeamMembersPanel({ workspacePath, language }: { workspacePath: string; language: string }) {
+  const [doc, setDoc] = useState<import("../../../lib/teamMembers").MembersDoc | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const refresh = useCallback(async () => {
+    if (!workspacePath) { setDoc(null); return; }
+    try {
+      const { readMembers } = await import("../../../lib/teamMembers");
+      const d = await readMembers(workspacePath);
+      setDoc(d);
+      setError(null);
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [workspacePath]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const onChange = () => void refresh();
+    window.addEventListener("heravex:team-members-changed", onChange);
+    return () => window.removeEventListener("heravex:team-members-changed", onChange);
+  }, [refresh]);
+
+  const pick = (en: string, tr: string, fr: string, es: string) =>
+    language === "tr" ? tr : language === "fr" ? fr : language === "es" ? es : en;
+
+  // No workspace selected — surface the same call-to-action as the
+  // Status group above. The user can still see this group from a
+  // local workspace; we keep the hint instead of hiding the group so
+  // the empty state explains *why* the panel is empty.
+  if (!workspacePath) {
+    return (
+      <SettingRow
+        title={pick("No team workspace active", "Aktif ekip çalışma alanı yok",
+          "Aucun espace équipe actif", "No hay espacio de equipo activo")}
+        description={pick(
+          "Pick a cloud-synced folder above to enable team membership.",
+          "Yukarıdan bir bulut-senk klasörü seçince ekip üyeliği etkinleşir.",
+          "Choisissez un dossier cloud ci-dessus pour activer l'équipe.",
+          "Elige una carpeta en la nube arriba para activar el equipo.",
+        )}
+      />
+    );
+  }
+
+  if (error) {
+    return (
+      <SettingRow
+        title={pick("Couldn't read members file", "Üyeler dosyası okunamadı",
+          "Impossible de lire les membres", "No se pudo leer miembros")}
+        description={error}
+      />
+    );
+  }
+
+  if (!doc) return <SettingRow title={pick("Loading…", "Yükleniyor…", "Chargement…", "Cargando…")} />;
+
+  const members = doc.members.slice().sort((a, b) => {
+    // Leader first, then non-banned by joinedAt, banned at the bottom.
+    const rank = (r: typeof a.role) => r === "leader" ? 0 : r === "member" ? 1 : 2;
+    const diff = rank(a.role) - rank(b.role);
+    return diff !== 0 ? diff : a.joinedAt.localeCompare(b.joinedAt);
+  });
+  const meId = (() => {
+    try { return localStorage.getItem("heravex_team_user_id") || ""; } catch { return ""; }
+  })();
+  const me = members.find((m) => m.userId === meId) ?? null;
+  const iAmLeader = me?.role === "leader";
+
+  const runLeaderAction = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      await refresh();
+      useAppStore.getState().showToast(
+        pick("Updated.", "Güncellendi.", "Mis à jour.", "Actualizado."),
+        "success",
+      );
+    } catch (err) {
+      useAppStore.getState().showToast(String(err), "error");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="team-members-list">
+      <div className="team-members-summary">
+        <span className="team-members-count">
+          {members.length}{" "}
+          {pick(members.length === 1 ? "member" : "members",
+                members.length === 1 ? "üye" : "üye",
+                members.length === 1 ? "membre" : "membres",
+                members.length === 1 ? "miembro" : "miembros")}
+        </span>
+        {me && (
+          <span className={`team-members-role team-members-role-${me.role}`}>
+            {pick(
+              me.role === "leader" ? "You're the leader" : me.role === "banned" ? "You're banned" : "You're a member",
+              me.role === "leader" ? "Sen lidersin" : me.role === "banned" ? "Banlandın" : "Sen üyesin",
+              me.role === "leader" ? "Vous êtes leader" : me.role === "banned" ? "Vous êtes banni" : "Vous êtes membre",
+              me.role === "leader" ? "Eres líder" : me.role === "banned" ? "Estás baneado" : "Eres miembro",
+            )}
+          </span>
+        )}
+      </div>
+      <ul className="team-members-items">
+        {members.map((m) => {
+          const isMe = m.userId === meId;
+          return (
+            <li key={m.userId} className={`team-member-row team-member-role-${m.role} ${isMe ? "is-me" : ""}`}>
+              <div className={`team-member-avatar role-${m.role}`} aria-hidden="true">
+                {m.avatarPath
+                  ? <img src={imgSrc(m.avatarPath)} alt="" />
+                  : <span>{(m.displayName || "?").slice(0, 1).toUpperCase()}</span>}
+              </div>
+              <div className="team-member-body">
+                <strong className="team-member-name">
+                  {m.displayName || pick("Anonymous", "İsimsiz", "Anonyme", "Anónimo")}
+                  {isMe && <span className="team-member-self-tag">
+                    {pick("you", "sen", "vous", "tú")}
+                  </span>}
+                </strong>
+                <span className="team-member-meta">
+                  <span className={`team-member-role-tag role-${m.role}`}>
+                    {pick(
+                      m.role === "leader" ? "Leader" : m.role === "banned" ? "Banned" : "Member",
+                      m.role === "leader" ? "Lider" : m.role === "banned" ? "Banlı" : "Üye",
+                      m.role === "leader" ? "Leader" : m.role === "banned" ? "Banni" : "Membre",
+                      m.role === "leader" ? "Líder" : m.role === "banned" ? "Baneado" : "Miembro",
+                    )}
+                  </span>
+                  <span>· {m.machineHint || "—"}</span>
+                  <span>· {pick("seen", "görüldü", "vu", "visto")} {new Date(m.lastSeenAt).toLocaleString()}</span>
+                </span>
+              </div>
+              {iAmLeader && !isMe && (
+                <div className="team-member-actions">
+                  {m.role === "banned" ? (
+                    <CompactButton
+                      onClick={() => void runLeaderAction(async () => {
+                        const { unbanMember } = await import("../../../lib/teamMembers");
+                        await unbanMember(workspacePath, meId, m.userId);
+                      })}
+                      disabled={busy}
+                    >
+                      {pick("Unban", "Banı Kaldır", "Débannir", "Desbanear")}
+                    </CompactButton>
+                  ) : (
+                    <CompactButton
+                      onClick={() => void runLeaderAction(async () => {
+                        const { banMember } = await import("../../../lib/teamMembers");
+                        await banMember(workspacePath, meId, m.userId);
+                      })}
+                      variant="danger"
+                      disabled={busy}
+                    >
+                      {pick("Ban", "Banla", "Bannir", "Banear")}
+                    </CompactButton>
+                  )}
+                  <CompactButton
+                    onClick={() => void runLeaderAction(async () => {
+                      const { transferLeadership } = await import("../../../lib/teamMembers");
+                      await transferLeadership(workspacePath, meId, m.userId);
+                    })}
+                    disabled={busy || m.role === "banned"}
+                  >
+                    {pick("Make leader", "Lider Yap", "Promouvoir", "Hacer líder")}
+                  </CompactButton>
+                  <CompactButton
+                    onClick={() => void runLeaderAction(async () => {
+                      const ok = window.confirm(pick(
+                        `Remove ${m.displayName} from the team?`,
+                        `${m.displayName} ekipten çıkarılsın mı?`,
+                        `Retirer ${m.displayName} de l'équipe ?`,
+                        `¿Eliminar a ${m.displayName} del equipo?`,
+                      ));
+                      if (!ok) return;
+                      const { removeMember } = await import("../../../lib/teamMembers");
+                      await removeMember(workspacePath, meId, m.userId);
+                    })}
+                    variant="danger"
+                    disabled={busy}
+                  >
+                    {pick("Remove", "Çıkar", "Retirer", "Eliminar")}
+                  </CompactButton>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="team-members-footnote">
+        {pick(
+          "Roles and bans are stored in heravex-members.json inside the workspace folder. Only the leader's writes are authoritative.",
+          "Roller ve banlar workspace klasöründeki heravex-members.json dosyasında tutulur. Sadece liderin yazdığı geçerlidir.",
+          "Les rôles et bannissements sont stockés dans heravex-members.json. Seuls les écrits du leader font autorité.",
+          "Los roles y baneos están en heravex-members.json dentro de la carpeta. Solo el líder tiene autoridad.",
+        )}
+      </p>
+    </div>
   );
 }
 
@@ -2907,5 +3149,250 @@ function AboutPage() {
         />
       </SettingGroup>
     </>
+  );
+}
+
+// ── Dashboard panels — toggle + drag-reorder ─────────────────────────────────
+//
+// Lives inside Settings → Layout → Dashboard panels. Sits inside a
+// SettingGroup but renders its own list (the layout doesn't fit the
+// generic SettingRow shape because each row is the panel's surface,
+// not a label + control). Sync model:
+//   • The list lives in `layout.dashboardWidgets.panels` (Zustand).
+//   • Reorder.Group writes the whole reordered list back via setLayout.
+//   • Each row's checkbox toggles `enabled` for that panel id.
+//   • Reset restores DEFAULT_DASHBOARD_PANELS.
+//
+// Every Dashboard panel id MUST appear here with a label + summary;
+// `PANEL_COPY` is the single translation surface so new panels just
+// extend the table.
+
+const PANEL_COPY: Record<DashboardPanelId, { en: { title: string; desc: string }; tr: { title: string; desc: string }; fr: { title: string; desc: string }; es: { title: string; desc: string } }> = {
+  recentGames: {
+    en: { title: "Recently updated games", desc: "Last five games with progress bars." },
+    tr: { title: "Son güncellenen oyunlar", desc: "İlerleme çubuğuyla son beş oyun." },
+    fr: { title: "Jeux récemment mis à jour", desc: "Cinq derniers jeux avec leur progression." },
+    es: { title: "Juegos actualizados recientemente", desc: "Últimos cinco juegos con barras de progreso." },
+  },
+  tasksAtRisk: {
+    en: { title: "Tasks at risk", desc: "Overdue, due-soon, and oldest pending tasks." },
+    tr: { title: "Riskli görevler", desc: "Gecikmiş, yakında ve en eski bekleyen görevler." },
+    fr: { title: "Tâches à risque", desc: "En retard, bientôt et les plus anciennes en attente." },
+    es: { title: "Tareas en riesgo", desc: "Atrasadas, próximas y más antiguas pendientes." },
+  },
+  spendTrend: {
+    en: { title: "7-day spending", desc: "Daily spend chart for the last week." },
+    tr: { title: "7 günlük harcama", desc: "Son haftanın günlük harcama grafiği." },
+    fr: { title: "Dépenses 7 jours", desc: "Graphique quotidien de la dernière semaine." },
+    es: { title: "Gasto 7 días", desc: "Gráfico diario de la última semana." },
+  },
+  overview: {
+    en: { title: "Overview", desc: "Total spend, completion rate, spend-by-project pie." },
+    tr: { title: "Genel bakış", desc: "Toplam harcama, tamamlanma oranı, proje pastası." },
+    fr: { title: "Vue d'ensemble", desc: "Dépense totale, taux d'achèvement, camembert par projet." },
+    es: { title: "Resumen", desc: "Gasto total, completado, gráfico por proyecto." },
+  },
+};
+
+function pickPanelCopy(id: DashboardPanelId, language: string) {
+  const map = PANEL_COPY[id];
+  if (language === "tr") return map.tr;
+  if (language === "fr") return map.fr;
+  if (language === "es") return map.es;
+  return map.en;
+}
+
+/** Dropdown selector for the hero left card. The 8 variants + "none"
+ *  cover the workflows we discussed in v0.9.7 — pick whichever matches
+ *  the user's current routine. */
+function DashboardHeroCardRow({
+  language,
+  layout,
+  setLayout,
+}: {
+  language: string;
+  layout: LayoutSlice;
+  setLayout: (patch: Partial<LayoutSlice>) => void;
+}) {
+  const pick = (en: string, tr: string, fr: string, es: string) =>
+    language === "tr" ? tr : language === "fr" ? fr : language === "es" ? es : en;
+
+  const options: { id: DashboardHeroCard; label: string; desc: string }[] = [
+    {
+      id: "studioCard",
+      label: pick("Studio report card", "Stüdyo karnesi", "Carte studio", "Tarjeta del estudio"),
+      desc: pick("Brand + games + shipped + focus hours + days active.",
+        "Stüdyo adı + oyun sayısı + yayında + odak saati + aktif gün.",
+        "Marque + jeux + publiés + heures de focus + jours actifs.",
+        "Marca + juegos + publicados + horas de foco + días activos."),
+    },
+    {
+      id: "sirada",
+      label: pick("Next up", "Sırada", "Prochaine", "Siguiente"),
+      desc: pick("The single most urgent task waiting on you.",
+        "Bekleyen en acil tek görev.",
+        "La tâche la plus urgente.",
+        "La tarea más urgente."),
+    },
+    {
+      id: "pomodoro",
+      label: pick("Pomodoro session", "Pomodoro oturumu", "Session Pomodoro", "Sesión Pomodoro"),
+      desc: pick("Current phase, time left, and a play/pause button.",
+        "Aktif faz, kalan süre ve oynat/duraklat butonu.",
+        "Phase actuelle, temps restant et bouton play/pause.",
+        "Fase actual, tiempo restante y botón play/pause."),
+    },
+    {
+      id: "quickCapture",
+      label: pick("Quick capture", "Hızlı yakalama", "Capture rapide", "Captura rápida"),
+      desc: pick("Inline input that creates a task or note on Enter.",
+        "Enter ile anında görev/not oluşturan inline input.",
+        "Champ inline qui crée une tâche/note avec Entrée.",
+        "Input inline que crea tarea/nota al pulsar Enter."),
+    },
+    {
+      id: "releaseCountdown",
+      label: pick("Release countdown", "Yayın geri sayımı", "Compte à rebours", "Cuenta atrás de lanzamiento"),
+      desc: pick("Closest release/build/launch milestones with day count.",
+        "En yakın release/build/yayın görevleri ve kalan gün.",
+        "Plus proches jalons de sortie avec jours restants.",
+        "Próximos hitos de lanzamiento con días restantes."),
+    },
+    {
+      id: "todayMicro",
+      label: pick("Today's micro-stats", "Bugün özet", "Stats du jour", "Hoy resumen"),
+      desc: pick("Today's closed count, focus minutes, tasks due today.",
+        "Bugün kapanan, odak dakikası, bugün due görev.",
+        "Tâches fermées, minutes de focus, dues du jour.",
+        "Cerradas hoy, minutos de foco, vencen hoy."),
+    },
+    {
+      id: "todayGoal",
+      label: pick("Today's goal", "Bugünün hedefi", "Objectif du jour", "Meta del día"),
+      desc: pick("Editable single-line goal/mantra, saved per day.",
+        "Tek satır editable hedef/mantra, güne özel kaydedilir.",
+        "Objectif modifiable d'une ligne, sauvegardé par jour.",
+        "Meta editable de una línea, guardada por día."),
+    },
+    {
+      id: "pinnedShortcuts",
+      label: pick("Pinned shortcuts", "Sabit kısayollar", "Raccourcis épinglés", "Atajos fijados"),
+      desc: pick("Three most recently active games as quick shortcuts.",
+        "Son aktif 3 oyun kısayol olarak.",
+        "Trois jeux les plus actifs en raccourci.",
+        "Tres juegos más activos como atajos."),
+    },
+    {
+      id: "none",
+      label: pick("Hide", "Gizle", "Masquer", "Ocultar"),
+      desc: pick("No card — hero shrinks accordingly.",
+        "Kart yok — hero küçülür.",
+        "Pas de carte — le hero rétrécit.",
+        "Sin tarjeta — el hero se reduce."),
+    },
+  ];
+
+  const current = layout.dashboardHeroCard ?? "studioCard";
+  return (
+    <SettingRow
+      title={pick("Hero left card", "Hero sol kartı", "Carte gauche du hero", "Tarjeta izquierda del hero")}
+      description={pick(
+        "What sits in the top-left of the dashboard, next to the activity strip.",
+        "Dashboard'ın sol üstünde, aktivite şeridinin yanında ne dursun.",
+        "Ce qui se trouve en haut à gauche du dashboard.",
+        "Lo que aparece arriba a la izquierda del dashboard.",
+      )}
+      control={
+        <Dropdown
+          value={current}
+          options={options.map((o) => ({ id: o.id, label: `${o.label} — ${o.desc}` }))}
+          onChange={(id) => setLayout({ dashboardHeroCard: id as DashboardHeroCard })}
+        />
+      }
+    />
+  );
+}
+
+function DashboardPanelsRow({
+  language,
+  layout,
+  setLayout,
+}: {
+  language: string;
+  layout: LayoutSlice;
+  setLayout: (patch: Partial<LayoutSlice>) => void;
+}) {
+  const panels = layout.dashboardWidgets.panels;
+  const pick = (en: string, tr: string, fr: string, es: string) =>
+    language === "tr" ? tr : language === "fr" ? fr : language === "es" ? es : en;
+
+  const writeOrder = (next: DashboardPanelEntry[]) =>
+    setLayout({ dashboardWidgets: { panels: next } });
+
+  const toggle = (id: DashboardPanelId) =>
+    writeOrder(panels.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p)));
+
+  const reset = () =>
+    writeOrder(DEFAULT_DASHBOARD_PANELS.map((p) => ({ ...p })));
+
+  const enabledCount = panels.filter((p) => p.enabled).length;
+
+  return (
+    <div className="dashboard-panels-editor">
+      <div className="dashboard-panels-hint">
+        <div>
+          <p className="dashboard-panels-hint-title">
+            {pick(
+              "Drag to reorder, click to show/hide.",
+              "Sıralamak için sürükle, göstermek/gizlemek için tıkla.",
+              "Glisser pour réordonner, cliquer pour afficher/masquer.",
+              "Arrastra para reordenar, clic para mostrar/ocultar.",
+            )}
+          </p>
+          <p className="dashboard-panels-hint-sub">
+            {pick(
+              `${enabledCount} of ${panels.length} panels visible`,
+              `${panels.length} panelden ${enabledCount} tanesi açık`,
+              `${enabledCount} panneaux visibles sur ${panels.length}`,
+              `${enabledCount} de ${panels.length} paneles visibles`,
+            )}
+          </p>
+        </div>
+        <button type="button" className="dashboard-panels-reset" onClick={reset}>
+          <RotateCcw size={12} />
+          {pick("Reset", "Sıfırla", "Réinitialiser", "Restablecer")}
+        </button>
+      </div>
+
+      <Reorder.Group
+        as="ul"
+        axis="y"
+        values={panels}
+        onReorder={(next) => writeOrder(next as DashboardPanelEntry[])}
+        className="dashboard-panels-list"
+      >
+        {panels.map((p) => {
+          const copy = pickPanelCopy(p.id, language);
+          return (
+            <Reorder.Item
+              key={p.id}
+              value={p}
+              as="li"
+              className={`dashboard-panel-row ${p.enabled ? "is-enabled" : "is-disabled"}`}
+              whileDrag={{ scale: 1.015, boxShadow: "0 14px 32px rgba(0,0,0,0.4)" }}
+            >
+              <span className="dashboard-panel-handle" aria-hidden="true">
+                <GripVertical size={14} />
+              </span>
+              <div className="dashboard-panel-row-body">
+                <strong className="dashboard-panel-row-title">{copy.title}</strong>
+                <span className="dashboard-panel-row-desc">{copy.desc}</span>
+              </div>
+              <Toggle checked={p.enabled} onChange={() => toggle(p.id)} />
+            </Reorder.Item>
+          );
+        })}
+      </Reorder.Group>
+    </div>
   );
 }

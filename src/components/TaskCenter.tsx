@@ -122,6 +122,14 @@ export function TaskCenter() {
 
   // ── Drop a task onto a column. If we land on the Done column we also mark
   //   the task as done; landing on any other column re-opens it. */
+  //
+  // v0.9.7 bug fix: drag-onto-Done was setting `done=true` but leaving
+  // `completedAt` untouched. Every dashboard surface that counts
+  // completions (hero "completed this week", the 7-day activity strip,
+  // the "closed today" micro-stat) keys on `completedAt`, so a
+  // drag-completed task wasn't appearing in any of them — only the
+  // click-to-complete button (which now goes through the same patch
+  // shape) wrote the timestamp. We mirror that contract here.
   const handleDropToCol = useCallback((task: FlatTask, colId: string) => {
     const game = games.find((g) => g.id === task.gameId);
     const col = (game?.boardColumns ?? kanbanColumns).find((c) => c.id === colId);
@@ -129,6 +137,11 @@ export function TaskCenter() {
     void updateTaskInGame(task.gameId, task.id, {
       boardColumnId: colId,
       done: dropIsDone,
+      // Mirror the `handleToggleCard` contract: stamp on close, clear on
+      // re-open. Keeping the value `null` when re-opening (instead of
+      // undefined) lets the store's saver overwrite the previous time
+      // explicitly so the dashboard doesn't keep counting it.
+      completedAt: dropIsDone ? new Date().toISOString() : null,
     });
   }, [games, kanbanColumns, updateTaskInGame]);
 
@@ -204,9 +217,32 @@ export function TaskCenter() {
   }, [updateTaskInGame]);
 
   // ── ✓ button in kanban card ───────────────────────────────────────────────────
+  //
+  // Bug fix v0.9.7: the bare `toggleTask` flipped `done` but left
+  // `boardColumnId` untouched, so a card that had been dragged into
+  // a custom column stayed put visually — `colIdForTask` (KanbanBoard)
+  // honours an explicit `boardColumnId` over the `done` flag.
+  //
+  // The kanban variant of toggle now mirrors `handleDropToCol`:
+  //   • becoming done  → snap to the game's Done column
+  //   • becoming open  → clear `boardColumnId` so the task lands back
+  //                       in the first non-done column on next render
+  // Plus it still emits a notification (lifted from the store's
+  // toggleTask path) so completion feedback parity is kept.
   const handleToggleCard = useCallback((task: FlatTask) => {
-    void toggleTask(task.gameId, task.id);
-  }, [toggleTask]);
+    const game = games.find((g) => g.id === task.gameId);
+    if (!game) { void toggleTask(task.gameId, task.id); return; }
+    const cols = game.boardColumns ?? kanbanColumns;
+    const doneCol = cols.find((c) => c.isDone);
+    const becomingDone = !task.done;
+    void updateTaskInGame(task.gameId, task.id, {
+      done: becomingDone,
+      boardColumnId: becomingDone
+        ? (doneCol?.id ?? DONE_COLUMN_ID)
+        : null,
+      completedAt: becomingDone ? new Date().toISOString() : null,
+    });
+  }, [games, kanbanColumns, toggleTask, updateTaskInGame]);
 
   const isKanban = viewMode === "kanban";
   // Inspector panel only shows in list mode; Kanban uses a centered modal so
@@ -280,42 +316,57 @@ export function TaskCenter() {
               language={language}
               ui={ui as Record<string, unknown>}
               onCreate={async (pickedId, task) => {
-                // Resolve "__general__" to a real (or freshly created) marker game
-                let targetGameId = pickedId;
-                if (pickedId === GENERAL_GAME_ID) {
-                  const existing = findGeneralGame(games);
-                  if (existing) {
-                    targetGameId = existing.id;
-                  } else {
-                    const created = await handleCreateGame({
-                      title: language === "tr" ? "Stüdyo Genel" : "Studio General",
-                      summary: language === "tr"
-                        ? "Belirli bir projeye bağlı olmayan genel görevler."
-                        : "General tasks not tied to a specific project.",
-                      status: "Fikir",
-                      platforms: [],
-                      tags: [GENERAL_GAME_TAG],
-                    });
-                    if (!created) return;
-                    targetGameId = created.id;
-                    // The game was created with no tasks; append immediately.
-                    await handleSaveGame(
-                      { ...created, tasks: [...created.tasks, task] },
-                      String(ui.taskAdded ?? (language === "tr" ? "Görev eklendi" : "Task added")),
-                    );
-                    setActiveTaskId(task.id);
-                    setShowAdd(false);
-                    return;
+                // Defensive wrapper: store actions already catch their own
+                // failures and surface error toasts via translateError, but
+                // any non-await throw (e.g. corrupted task payload, null
+                // game lookup) would leave the modal stuck open. The catch
+                // here keeps the modal closable on unexpected failures.
+                try {
+                  // Resolve "__general__" to a real (or freshly created) marker game
+                  let targetGameId = pickedId;
+                  if (pickedId === GENERAL_GAME_ID) {
+                    const existing = findGeneralGame(games);
+                    if (existing) {
+                      targetGameId = existing.id;
+                    } else {
+                      const created = await handleCreateGame({
+                        title: language === "tr" ? "Stüdyo Genel" : "Studio General",
+                        summary: language === "tr"
+                          ? "Belirli bir projeye bağlı olmayan genel görevler."
+                          : "General tasks not tied to a specific project.",
+                        status: "Fikir",
+                        platforms: [],
+                        tags: [GENERAL_GAME_TAG],
+                      });
+                      if (!created) return; // create failed → store already toasted
+                      targetGameId = created.id;
+                      // The game was created with no tasks; append immediately.
+                      const savedNew = await handleSaveGame(
+                        { ...created, tasks: [...created.tasks, task] },
+                        String(ui.taskAdded ?? (language === "tr" ? "Görev eklendi" : "Task added")),
+                      );
+                      if (!savedNew) return; // save failed → keep modal open
+                      setActiveTaskId(task.id);
+                      setShowAdd(false);
+                      return;
+                    }
                   }
+                  const game = games.find((g) => g.id === targetGameId);
+                  if (!game) return;
+                  const saved = await handleSaveGame(
+                    { ...game, tasks: [...game.tasks, task] },
+                    String(ui.taskAdded ?? (language === "tr" ? "Görev eklendi" : "Task added")),
+                  );
+                  if (!saved) return; // save failed → keep modal open
+                  setActiveTaskId(task.id);
+                  setShowAdd(false);
+                } catch (err) {
+                  // Last-resort guard; should be unreachable because the
+                  // store wraps its IPC calls, but a defensive log keeps
+                  // dev-time surprises debuggable. The modal stays open so
+                  // the user can retry.
+                  if (import.meta.env.DEV) console.warn("[task-add] unexpected:", err);
                 }
-                const game = games.find((g) => g.id === targetGameId);
-                if (!game) return;
-                const saved = await handleSaveGame(
-                  { ...game, tasks: [...game.tasks, task] },
-                  String(ui.taskAdded ?? (language === "tr" ? "Görev eklendi" : "Task added")),
-                );
-                setActiveTaskId(task.id);
-                if (saved) setShowAdd(false);
               }}
               onClose={() => setShowAdd(false)}
             />

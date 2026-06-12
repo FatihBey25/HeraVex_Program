@@ -69,6 +69,13 @@ export type ExpenseItem = {
   notes: string;
   currency?: string;
   isRecurring?: boolean;
+  /** Game IDs this general expense should be split across. Only meaningful
+   *  on `globalExpenses` records — when present, the expense's cost is
+   *  divided evenly across the listed games (e.g. a $20 Claude Code
+   *  subscription shared between 4 games shows up as $5 per-game spend).
+   *  The studio-level total still counts the full $20 once, so totals
+   *  never double-count. Empty / undefined means "studio overhead only". */
+  sharedWithGameIds?: string[];
 };
 
 /** A single visual reference on a game's moodboard.

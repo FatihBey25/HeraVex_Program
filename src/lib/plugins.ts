@@ -150,6 +150,15 @@ export async function mountPluginWidgets(
       });
     } catch (err) {
       devWarn(`[plugins] ${p.manifest.id} mount failed:`, err);
+      // Surface broken plugins to anything that wants to render a
+      // "Plugin failed" badge — Settings → Plugins, a dev panel, etc.
+      // We don't toast directly because a broken plugin shouldn't spam
+      // the user every page switch.
+      try {
+        window.dispatchEvent(new CustomEvent("heravex:plugin-failed", {
+          detail: { id: p.manifest.id, name: p.manifest.name, error: String(err) },
+        }));
+      } catch { /* no-op */ }
     }
   }
 }

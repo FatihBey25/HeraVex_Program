@@ -84,6 +84,14 @@ export async function saveExchangeRates(rates: Record<string, number>) {
   return invoke<void>("save_exchange_rates", { rates });
 }
 
+/** Pulls live FX from the Rust side. Rust tries multiple providers,
+ *  returns "USD per CUR" so the renderer can multiply amounts directly.
+ *  Throws if every source fails — callers should swallow + keep last
+ *  cached rates rather than blocking the user. */
+export async function fetchLiveExchangeRates() {
+  return invoke<Record<string, number>>("fetch_live_exchange_rates");
+}
+
 export async function saveCurrencyLabels(label1: string, label2: string) {
   return invoke<void>("save_currency_labels", { label1, label2 });
 }

@@ -3,7 +3,18 @@ import { Search, Command as CommandIcon, ArrowRight, ChevronRight, FileText, Lis
 import { useAppStore, type WorkspaceTab } from "../store";
 import { useEscape } from "../lib/keyboard";
 import { getAllNotes } from "../lib/storage";
+import { invoke } from "../lib/invokeWrapper";
 import type { NoteRecord } from "../types";
+
+/** Shape returned by the Rust `search_notes` command. */
+interface RustNoteHit {
+  kind: "global" | "game";
+  noteId: string;
+  gameId?: string | null;
+  title: string;
+  snippet: string;
+  score: number;
+}
 
 type PaletteMode = "actions" | "search";
 
@@ -63,6 +74,22 @@ export function CommandPalette({
       catch { setNotes([]); }
     })();
   }, [mode, notes]);
+
+  // v0.9.7 — Rust-side global search for notes. Debounced 150ms so a
+  // burst of keystrokes doesn't fire ten Tauri calls. Falls back to
+  // the JS in-memory substring search below if the command fails
+  // (older builds without the `search_notes` handler).
+  const [rustHits, setRustHits] = useState<RustNoteHit[]>([]);
+  useEffect(() => {
+    if (mode !== "search" || !effectiveQuery.trim()) { setRustHits([]); return; }
+    let cancelled = false;
+    const t = window.setTimeout(() => {
+      void invoke<RustNoteHit[]>("search_notes", { query: effectiveQuery, limit: 12 })
+        .then((hits) => { if (!cancelled) setRustHits(hits); })
+        .catch(() => { if (!cancelled) setRustHits([]); });
+    }, 150);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [effectiveQuery, mode]);
 
   const go = (tab: WorkspaceTab) => {
     setWorkspaceTab(tab);
@@ -140,22 +167,44 @@ export function CommandPalette({
       if (taskCount >= 6) break;
     }
 
-    (notes || []).slice(0, 50).forEach((n) => {
-      if (hits.filter((h) => h.kind === "note").length >= 6) return;
-      const hay = `${n.title} ${n.content}`.toLocaleLowerCase(language);
-      if (hay.includes(q)) {
-        hits.push({
-          id: `note:${n.id}`,
-          kind: "note",
-          label: n.title || tr("Untitled note", "Adsız not"),
-          hint: (n.content || "").slice(0, 80).replace(/\s+/g, " "),
-          run: () => { go("notes"); },
-        });
-      }
-    });
+    // Rust-side note search results — ranked, with snippet. If the
+    // Rust call hasn't returned yet (or returned empty), fall back to
+    // the legacy JS substring scan against the in-memory notes
+    // cache so the user sees *something* immediately.
+    const fromRust = rustHits.slice(0, 8).map<SearchHit>((r) => ({
+      id: `${r.kind}-note:${r.noteId}`,
+      kind: "note",
+      label: r.title || tr("Untitled note", "Adsız not"),
+      hint: r.snippet.replace(/\s+/g, " "),
+      run: () => {
+        if (r.kind === "game" && r.gameId) {
+          setSelectedId(r.gameId);
+          go("library");
+        } else {
+          go("notes");
+        }
+      },
+    }));
+    if (fromRust.length > 0) {
+      hits.push(...fromRust);
+    } else {
+      (notes || []).slice(0, 50).forEach((n) => {
+        if (hits.filter((h) => h.kind === "note").length >= 6) return;
+        const hay = `${n.title} ${n.content}`.toLocaleLowerCase(language);
+        if (hay.includes(q)) {
+          hits.push({
+            id: `note:${n.id}`,
+            kind: "note",
+            label: n.title || tr("Untitled note", "Adsız not"),
+            hint: (n.content || "").slice(0, 80).replace(/\s+/g, " "),
+            run: () => { go("notes"); },
+          });
+        }
+      });
+    }
 
     return hits;
-  }, [effectiveQuery, language, games, notes, setSelectedId, setActiveTaskId, setWorkspaceTab]);
+  }, [effectiveQuery, language, games, notes, rustHits, setSelectedId, setActiveTaskId, setWorkspaceTab]);
 
   const showActions = mode === "actions";
   const list = showActions ? filteredActions : searchHits;

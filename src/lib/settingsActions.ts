@@ -97,6 +97,20 @@ export function downloadJson(filename: string, payload: string) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (err) {
     console.warn("[downloadJson]", err);
+    // Lazy-import the store so this util stays cheap to consume from
+    // contexts that don't otherwise need it. The user sees a toast
+    // instead of staring at a silent button.
+    void import("../store").then(({ useAppStore }) => {
+      const { showToast, language } = useAppStore.getState();
+      const msg = language === "tr"
+        ? "Dosya indirilemedi."
+        : language === "fr"
+        ? "Téléchargement impossible."
+        : language === "es"
+        ? "No se pudo descargar el archivo."
+        : "Download failed.";
+      showToast(msg, "error");
+    }).catch(() => null);
   }
 }
 
