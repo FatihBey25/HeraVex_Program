@@ -35,10 +35,18 @@ export interface TeamModeSlice {
 }
 
 export const DEFAULT_TEAM_MODE: TeamModeSlice = {
-  conflictStrategy: "lastWriterWins",
-  watcherDelay: "5s",
+  // v0.9.7 rewrite: autoMerge is the new default because the new
+  // team-sync orchestrator does per-file granular reloads instead of
+  // the old "anything changed → modal" pattern. The conflict dialog
+  // is only useful when two users edit the SAME file at the same
+  // time; everything else can merge silently.
+  conflictStrategy: "autoMerge",
+  // Polling tightened from 5s → "instant" (3s underlying). The
+  // manifest call is cheap and tighter intervals make remote edits
+  // feel real-time.
+  watcherDelay: "instant",
   showWatcherLogs: false,
-  showPresence: false,
+  showPresence: true,
 };
 
 // ── Webhooks ────────────────────────────────────────────────────────

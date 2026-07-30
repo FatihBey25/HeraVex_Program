@@ -1,0 +1,16 @@
+{
+  "id": "studio-stats",
+  "name": "Stüdyo İstatistikleri",
+  "description": "Oyunlarını ve görev ilerlemeni tek sayfada özetler — HeraVex eklenti sisteminin örnek eklentisi.",
+  "version": "1.0.0",
+  "author": "HeraVex",
+  "apiVersion": 1,
+  "entry": "index.js",
+  "permissions": ["readGames", "readTasks", "storage"],
+  "contributes": {
+    "pages": [{ "id": "stats", "title": "Stüdyo İstatistikleri", "icon": "BarChart3" }],
+    "widgets": [{ "id": "mini", "slot": "dashboard" }],
+    "commands": [{ "id": "refresh", "title": "İstatistikleri yenile" }],
+    "settings": [{ "id": "prefs", "title": "Tercihler" }]
+  }
+}

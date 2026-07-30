@@ -48,10 +48,14 @@ export type WorkspaceTab =
   | "storehub"
   | "tasks"
   | "notes"
+  | "flow"
   | "calendar"
   | "wallet"
   | "analytics"
-  | "profile";
+  | "profile"
+  // Plugin-contributed pages: `plugin:<pluginId>/<pageId>`. The union
+  // stays closed for core tabs so `===` narrowing keeps working.
+  | `plugin:${string}`;
 
 export type Toast = {
   id: number;
@@ -196,16 +200,34 @@ async function applyMoodboardNoteLink(
   const note = await loadNoteById(noteId);
   if (!note) return;
 
+  // v0.9.7 race-condition pass: two-phase write with rollback.
+  //
+  // Previously the note was written first; if the subsequent game
+  // write failed, the link was permanently inconsistent — the note
+  // pointed at an item the moodboard had no record of. The new
+  // sequence:
+  //   1. Save the note (with the new link in `moodboardImageIds`).
+  //   2. Save the game (with the matching link in `linkedNoteIds`).
+  //   3. On step-2 failure, REVERT the note to the original copy so
+  //      the two sides converge on the pre-mutation state.
+  // If the revert itself fails (truly catastrophic disk error), we
+  // surface a toast so the user knows a manual reconciliation is
+  // needed — silently shipping inconsistent state was the old bug.
+  const originalNote = note;
   const newNote: NoteRecord = {
     ...note,
     moodboardImageIds: mutateLinkArray(note.moodboardImageIds, itemId, attach),
   };
+  let noteWritten = false;
   try {
     await storage.saveNote(newNote);
     notifyNotesUpdated();
+    noteWritten = true;
   } catch (err) {
     devWarn(`[applyMoodboardNoteLink] note save failed:`, err);
-    // Continue — moodboard side still saved below.
+    // Note write itself failed — nothing on disk yet, no rollback
+    // needed. Skip the game write to keep both sides consistent.
+    return;
   }
 
   const newItem: MoodboardItem = {
@@ -216,7 +238,23 @@ async function applyMoodboardNoteLink(
     ...game.moodboard,
     items: game.moodboard.items.map((m) => (m.id === itemId ? newItem : m)),
   };
-  await handleSaveGame({ ...game, moodboard });
+  const saved = await handleSaveGame({ ...game, moodboard });
+  if (saved === null && noteWritten) {
+    // Game save failed AFTER the note was written — roll the note
+    // back to its pre-link state so the two files converge again.
+    try {
+      await storage.saveNote(originalNote);
+      notifyNotesUpdated();
+    } catch (revertErr) {
+      devWarn(`[applyMoodboardNoteLink] revert also failed:`, revertErr);
+      try {
+        getStore().showToast(
+          "Moodboard bağlantısı yarım kaldı — Notlar ve Moodboard panelini elle kontrol et.",
+          "error",
+        );
+      } catch { /* showToast unavailable in test contexts */ }
+    }
+  }
 }
 
 interface AppStore {
@@ -261,7 +299,7 @@ interface AppStore {
 
   // ── game actions ───────────────────────────────────────────────────────────
   init: () => Promise<void>;
-  refreshGames: (preferredId?: string) => Promise<void>;
+  refreshGames: (preferredId?: string, opts?: { silent?: boolean }) => Promise<void>;
   applySavedGame: (game: GameRecord) => void;
   handleCreateGame: (opts: {
     title: string;
@@ -756,24 +794,29 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  refreshGames: async (preferredId) => {
-    set({ isLoading: true });
+  refreshGames: async (preferredId, opts) => {
+    const silent = opts?.silent === true;
+    if (!silent) set({ isLoading: true });
     try {
       const lang = get().language;
       let next = await storage.loadGames();
       next = next.map((g) => ensureBoardColumns({ ...g, expenses: g.expenses ?? [] }, lang));
-      const { selectedId } = get();
+      const { selectedId, activeTaskId } = get();
       const fallback = preferredId ?? selectedId;
       const exists = fallback && next.some((g) => g.id === fallback);
+      // Silent mode preserves the user's current selection so the
+      // dashboard, library detail pane, and task center don't jump.
+      // Loud mode resets activeTaskId because a full refresh usually
+      // means the task list was reordered or replaced.
       set({
         games: next,
-        selectedId: exists ? fallback : "",
-        activeTaskId: "",
-        isLoading: false,
+        selectedId: exists ? fallback : (silent ? selectedId : ""),
+        activeTaskId: silent ? activeTaskId : "",
+        ...(silent ? {} : { isLoading: false }),
       });
     } catch (err) {
-      get().showToast(translateError(err, get().language), "error");
-      set({ isLoading: false });
+      if (!silent) get().showToast(translateError(err, get().language), "error");
+      if (!silent) set({ isLoading: false });
     }
   },
 

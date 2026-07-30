@@ -2,11 +2,12 @@
 import { motion, AnimatePresence } from "framer-motion";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid,
 } from "recharts";
 import {
   Flame, TrendingUp, TrendingDown, Wallet as WalletIcon, RefreshCw,
   FileDown, ChevronDown, Loader2, FileText, FileSpreadsheet, Code2,
-  BarChart3, Eye, Download, X,
+  BarChart3, Eye, Download, X, Package,
 } from "lucide-react";
 import { useAppStore } from "../../store";
 import { calculateAccumulatedAmount } from "../PieChartWidget";
@@ -84,6 +85,33 @@ export function Analytics() {
   }>({ total: 0, currency: null, perGame: {} });
   const [loadingRoi, setLoadingRoi] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [buildGameId, setBuildGameId] = useState<string>("");
+
+  // ── Build-size trend (uses VersionItem.buildFileSizeBytes) ──────────
+  const gamesWithBuilds = useMemo(
+    () => games.filter((g) => (g.versions ?? []).some((v) => (v.buildFileSizeBytes ?? 0) > 0)),
+    [games],
+  );
+  useEffect(() => {
+    if (gamesWithBuilds.length === 0) { if (buildGameId) setBuildGameId(""); return; }
+    if (!gamesWithBuilds.some((g) => g.id === buildGameId)) setBuildGameId(gamesWithBuilds[0].id);
+  }, [gamesWithBuilds, buildGameId]);
+  const buildData = useMemo(() => {
+    const g = games.find((x) => x.id === buildGameId);
+    if (!g) return [] as { name: string; mb: number; bytes: number }[];
+    return (g.versions ?? [])
+      .filter((v) => (v.buildFileSizeBytes ?? 0) > 0)
+      .slice()
+      .sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""))
+      .map((v) => ({ name: v.version || "?", mb: Number(((v.buildFileSizeBytes ?? 0) / (1024 * 1024)).toFixed(2)), bytes: v.buildFileSizeBytes ?? 0 }));
+  }, [games, buildGameId]);
+  const buildDelta = useMemo(() => {
+    if (buildData.length < 2) return null;
+    const prev = buildData[buildData.length - 2].bytes;
+    const cur = buildData[buildData.length - 1].bytes;
+    if (prev <= 0) return null;
+    return ((cur - prev) / prev) * 100;
+  }, [buildData]);
 
   // ── Financial report state ──────────────────────────────────────────
   const [rangeKey, setRangeKey] = useState<RangeKey>("this-month");
@@ -235,6 +263,10 @@ export function Analytics() {
 
   const usd = (n: number) =>
     n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toFixed(2)}`;
+  const fmtSize = (bytes: number) =>
+    bytes >= 1024 * 1024 * 1024 ? `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+    : bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    : `${(bytes / 1024).toFixed(0)} KB`;
 
   const roiPositive = earnings.total >= totalSpend;
   const roiRatio = totalSpend > 0 ? Math.min(1.5, earnings.total / totalSpend) : 0;
@@ -566,6 +598,77 @@ export function Analytics() {
           </button>
         </div>
       </motion.section>
+
+      {/* ── BUILD SIZE TREND ────────────────────────────────────────────── */}
+      {gamesWithBuilds.length > 0 && (
+        <motion.section
+          className="panel"
+          variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.32, delay: 0.04 } } }}
+        >
+          <div className="panel-head" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <div className="financial-report-head-icon"><Package size={18} strokeWidth={2.1} /></div>
+              <div>
+                <p className="eyebrow">{tr("BUILD HEALTH", "BUILD SAĞLIĞI")}</p>
+                <h3 style={{ margin: 0 }}>{tr("Build size over versions", "Sürümlere göre build boyutu")}</h3>
+              </div>
+            </div>
+            <select
+              className="input"
+              value={buildGameId}
+              onChange={(e) => setBuildGameId(e.target.value)}
+              style={{ maxWidth: 220 }}
+            >
+              {gamesWithBuilds.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}
+            </select>
+          </div>
+
+          {buildData.length === 0 ? (
+            <div className="chart-empty-hint">{tr("No build files recorded for this game.", "Bu oyun için build dosyası kaydı yok.")}</div>
+          ) : (
+            <>
+              <div className="build-trend-summary">
+                <div className="roi-figure">
+                  <span className="eyebrow">{tr("LATEST", "SON")}</span>
+                  <strong style={{ color: "#4f8cff" }}>{fmtSize(buildData[buildData.length - 1].bytes)}</strong>
+                </div>
+                {buildDelta != null && (
+                  <div className="roi-figure">
+                    <span className="eyebrow">{tr("VS PREVIOUS", "ÖNCEKİNE GÖRE")}</span>
+                    <strong style={{ color: buildDelta > 0 ? "#f87171" : "#34d399" }}>
+                      {buildDelta > 0 ? "▲ " : "▼ "}{Math.abs(buildDelta).toFixed(0)}%
+                    </strong>
+                  </div>
+                )}
+                <div className="roi-figure">
+                  <span className="eyebrow">{tr("VERSIONS", "SÜRÜM")}</span>
+                  <strong>{buildData.length}</strong>
+                </div>
+              </div>
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={buildData} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="buildFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#4f8cff" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#4f8cff" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis dataKey="name" tick={{ fill: "#8fa3bc", fontSize: 11 }} />
+                  <YAxis tick={{ fill: "#8fa3bc", fontSize: 11 }} width={48} tickFormatter={(v: number) => `${v}MB`} />
+                  <RechartsTooltip
+                    contentStyle={{ backgroundColor: "#1e293b", color: "#f8fafc", border: "none", borderRadius: 8, fontSize: 12 }}
+                    itemStyle={{ color: "#cbd5e1" }}
+                    labelStyle={{ color: "#f8fafc" }}
+                    formatter={(v: unknown) => [`${Number(v).toFixed(1)} MB`, tr("Build size", "Build boyutu")]}
+                  />
+                  <Area type="monotone" dataKey="mb" stroke="#4f8cff" strokeWidth={2} fill="url(#buildFill)" dot={{ r: 3, fill: "#4f8cff" }} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </>
+          )}
+        </motion.section>
+      )}
 
       {/* ── CATEGORY DONUT ──────────────────────────────────────────────── */}
       <motion.section

@@ -1,4 +1,4 @@
-// Notes editor — WYSIWYG single-pane (rewritten v0.9.x).
+﻿// Notes editor — WYSIWYG single-pane (rewritten v0.9.x).
 //
 // The previous design split the screen into a markdown textarea and
 // a rendered preview. The user wanted the inverse: one pane, the
@@ -22,18 +22,19 @@
 //     misses these patterns is rendered as plain paragraphs.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
-  Bold, Italic, Link as LinkIcon, FileDown, ListChecks, Code2,
-  Heading1, Heading2, Quote, Sparkles, Save, List, ListOrdered,
-  Table as TableIcon, Image as ImageIcon,
-  Info, AlertTriangle, AlertOctagon, CheckCircle2,
-  MessageSquareWarning, ListTree, ChevronRight as ChevronRightIcon,
-  Database as DatabaseIcon,
+  Bold, Italic, Link as LinkIcon, FileDown, Sparkles, Save,
+  Image as ImageIcon, ListTree, Plus,
 } from "lucide-react";
 import {
   buildDatabasePlaceholder, encodeDb, makeDatabase,
   mountDatabases, unmountDatabases,
 } from "../../lib/noteDatabase";
+import {
+  assetKindFromPath, buildAssetHtml, pickAssetFile, resolveAssetSrcs,
+} from "../../lib/noteAssets";
+import { getPluginSlashCommands } from "../../lib/plugins";
 // Inline mirror of the language list to keep the heavy highlight.js
 // bundle out of the main chunk — the editor only paid the cost
 // before because the import here pulled the whole highlighter graph.
@@ -175,6 +176,13 @@ export function MarkdownWorkspace({
         unmountDatabases(el);
         queueDatabaseMount();
       }
+      // Re-point local asset references at the current asset:// host.
+      // Saved HTML carries the absolute path in data-asset-path; the
+      // src is re-resolved here so references survive across reloads
+      // and Tauri version bumps.
+      if (el.querySelector("[data-asset-path]")) {
+        resolveAssetSrcs(el);
+      }
     }
     lastExternalValueRef.current = value;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -259,7 +267,6 @@ export function MarkdownWorkspace({
     // lazy module will be in cache after the first code block.
     queueHighlight();
   };
-  const [codeLangOpen, setCodeLangOpen] = useState(false);
 
   // Toggle / collapsible block — native <details>/<summary>. Works
   // in the editor, in the PDF (open by default), and in the markdown
@@ -376,7 +383,6 @@ export function MarkdownWorkspace({
     exec("insertHTML",
       `<div class="callout callout-${kind}"><strong>${title}</strong><p>${body}</p></div><p><br></p>`);
   };
-  const [calloutOpen, setCalloutOpen] = useState(false);
 
   // ── Table of Contents (v0.9.7) ──────────────────────────────────────
   //
@@ -434,6 +440,7 @@ export function MarkdownWorkspace({
       void runHighlightSweep();
     }, 60);
   };
+
   const runHighlightSweep = async () => {
     const el = editorRef.current;
     if (!el) return;
@@ -456,6 +463,233 @@ export function MarkdownWorkspace({
     });
     if (changed) emitChange();
   };
+
+  // ── Local asset insertion (v0.9.8) ──────────────────────────────────
+  //
+  // Three entry points, all converging on `insertAssetByPath`:
+  //   • toolbar Image button
+  //   • the `/asset` inline trigger (typed in the editor)
+  //   • OS drag-and-drop (handled by the Tauri webview event below)
+  // The file is never copied — only its absolute path is referenced.
+  const insertAssetByPath = (path: string) => {
+    const html = buildAssetHtml(path);
+    if (!html) {
+      window.alert(tr(
+        "Unsupported file type. Pick an image (png/jpg/gif/webp/svg) or audio (wav/mp3/ogg…).",
+        "Desteklenmeyen dosya türü. Bir görsel (png/jpg/gif/webp/svg) ya da ses (wav/mp3/ogg…) seç.",
+      ));
+      return;
+    }
+    exec("insertHTML", html + "<p><br></p>");
+    resolveAssetSrcs(editorRef.current);
+  };
+  const triggerAssetPicker = async () => {
+    // Snapshot the caret BEFORE the native dialog steals focus, then
+    // restore it so the asset lands where the user was typing.
+    captureSelection();
+    const path = await pickAssetFile();
+    if (!path) return;
+    restoreSelection();
+    insertAssetByPath(path);
+  };
+
+  // ── Slash command menu (v0.9.8) ─────────────────────────────────────
+  //
+  // Typing "/" anywhere opens a Notion-style command palette at the
+  // caret. Every block-level insert that used to clutter the toolbar
+  // lives here now; the toolbar keeps only inline format + global
+  // actions. The menu filters as the user types ("/tab" → Table,
+  // "/csharp" → C# code block) and is driven by keyboard (↑/↓/Enter/Esc)
+  // or click.
+  type SlashCmd = { id: string; label: string; hint: string; keywords: string; run: () => void };
+  const [slash, setSlash] = useState<{ query: string; top: number; left: number } | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const slashRangeRef = useRef<Range | null>(null);
+
+  const insertDivider = () => exec("insertHTML", "<hr><p><br></p>");
+
+  const buildSlashCommands = (): SlashCmd[] => {
+    const cmds: SlashCmd[] = [
+      { id: "h1",   label: tr("Heading 1", "Başlık 1"),       hint: "H1",  keywords: "h1 heading title baslik",            run: () => formatBlock("h1") },
+      { id: "h2",   label: tr("Heading 2", "Başlık 2"),       hint: "H2",  keywords: "h2 heading subtitle baslik",         run: () => formatBlock("h2") },
+      { id: "h3",   label: tr("Heading 3", "Başlık 3"),       hint: "H3",  keywords: "h3 heading baslik",                  run: () => formatBlock("h3") },
+      { id: "p",    label: tr("Paragraph", "Paragraf"),       hint: "¶",   keywords: "p paragraph text metin",             run: () => formatBlock("p") },
+      { id: "quote",label: tr("Quote", "Alıntı"),             hint: "❝",   keywords: "quote blockquote alinti",            run: insertQuote },
+      { id: "ul",   label: tr("Bullet list", "Madde listesi"),hint: "•",   keywords: "bullet list ul madde liste",         run: insertBullet },
+      { id: "ol",   label: tr("Numbered list", "Numaralı liste"), hint: "1.", keywords: "numbered ordered ol liste numarali", run: insertNumbered },
+      { id: "todo", label: tr("Checklist", "Görev listesi"),  hint: "☑",   keywords: "checklist todo task gorev kutu",     run: insertChecklist },
+      { id: "table",label: tr("Table", "Tablo"),              hint: "▦",   keywords: "table tablo grid izgara",            run: () => insertTable() },
+      { id: "toggle",label: tr("Toggle list", "Açılır liste"),hint: "▸",   keywords: "toggle details acilir collapsible",  run: insertToggle },
+      { id: "db",   label: tr("Database", "Tablo (database)"),hint: "▤",   keywords: "database db tablo veritabani",        run: insertDatabase },
+      { id: "callout-info",  label: tr("Callout: Note", "Kutu: Not"),       hint: "ℹ", keywords: "callout note info bilgi not",   run: () => insertCallout("info") },
+      { id: "callout-ok",    label: tr("Callout: Tip", "Kutu: İpucu"),      hint: "✓", keywords: "callout tip ok ipucu",         run: () => insertCallout("ok") },
+      { id: "callout-warn",  label: tr("Callout: Warning", "Kutu: Uyarı"),  hint: "▲", keywords: "callout warning warn uyari",   run: () => insertCallout("warn") },
+      { id: "callout-danger",label: tr("Callout: Danger", "Kutu: Tehlike"), hint: "⛔", keywords: "callout danger tehlike",       run: () => insertCallout("danger") },
+      { id: "divider", label: tr("Divider", "Ayraç"),         hint: "—",   keywords: "divider hr rule ayrac cizgi",        run: insertDivider },
+      { id: "asset", label: tr("Image / Audio", "Görsel / Ses"), hint: "🖼", keywords: "asset image audio gorsel ses media resim", run: () => { void triggerAssetPicker(); } },
+    ];
+    // One entry per code language so "/code" or "/python" both work.
+    for (const l of SUPPORTED_LANGUAGES) {
+      cmds.push({
+        id: `code-${l.id}`,
+        label: tr(`Code: ${l.label}`, `Kod: ${l.label}`),
+        hint: "</>",
+        keywords: `code kod block ${l.id} ${l.label.toLowerCase()}`,
+        run: () => insertCode(l.id),
+      });
+    }
+    // Plugin-contributed slash commands (v0.9.9) — read live so a
+    // freshly-enabled plugin appears without an editor remount.
+    for (const pc of getPluginSlashCommands()) {
+      cmds.push({
+        id: `plugin-${pc.id}`,
+        label: pc.label,
+        hint: pc.hint ?? "🧩",
+        keywords: `${pc.label.toLowerCase()} ${pc.pluginName.toLowerCase()} plugin eklenti`,
+        run: () => {
+          pc.onSelect((html) => exec("insertHTML", html));
+        },
+      });
+    }
+    return cmds;
+  };
+
+  const filteredSlash = (): SlashCmd[] => {
+    if (!slash) return [];
+    const all = buildSlashCommands();
+    const q = slash.query.trim().toLowerCase();
+    if (!q) {
+      // No query yet → show the common blocks; collapse the long
+      // per-language code list down to a single generic entry.
+      return all.filter((c) => !c.id.startsWith("code-") || c.id === "code-plaintext");
+    }
+    return all
+      .filter((c) => c.label.toLowerCase().includes(q) || c.keywords.includes(q))
+      .slice(0, 9);
+  };
+
+  // Locate a "/token" immediately before the collapsed caret. Returns the
+  // query text + a range covering the token (for deletion + positioning).
+  const getSlashContext = (): { query: string; rect: DOMRect; range: Range } | null => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !sel.isCollapsed) return null;
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE) return null;
+    if (!editorRef.current?.contains(node)) return null;
+    const text = node.textContent ?? "";
+    const caret = range.startOffset;
+    let i = caret - 1;
+    while (i >= 0) {
+      const ch = text[i];
+      if (ch === "/") break;
+      if (/\s/.test(ch)) return null; // any whitespace ends the token
+      i--;
+    }
+    if (i < 0) return null;
+    // The "/" must start a word — beginning of node or preceded by space.
+    if (i > 0) {
+      const prev = text[i - 1];
+      if (!/\s/.test(prev)) return null;
+    }
+    const query = text.slice(i + 1, caret);
+    if (/\s/.test(query)) return null;
+    const tokenRange = document.createRange();
+    tokenRange.setStart(node, i);
+    tokenRange.setEnd(node, caret);
+    return { query, rect: tokenRange.getBoundingClientRect(), range: tokenRange };
+  };
+
+  const updateSlashFromCaret = () => {
+    const ctx = getSlashContext();
+    if (!ctx) { setSlash(null); slashRangeRef.current = null; return; }
+    slashRangeRef.current = ctx.range;
+    setSlash({ query: ctx.query, top: ctx.rect.bottom + 4, left: ctx.rect.left });
+    setSlashIndex(0);
+  };
+
+  const runSlashCommand = (cmd: SlashCmd) => {
+    // Strip the "/query" token before running so it never lingers.
+    const r = slashRangeRef.current;
+    if (r) {
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(r);
+      try { document.execCommand("delete"); } catch { /* no-op */ }
+    }
+    setSlash(null);
+    slashRangeRef.current = null;
+    cmd.run();
+  };
+
+  // Toolbar "+" button — seeds a "/" at the caret and opens the menu so
+  // the command palette stays discoverable without knowing the shortcut.
+  const openSlashMenu = () => {
+    focusEditor();
+    try { document.execCommand("insertText", false, "/"); } catch { /* no-op */ }
+    updateSlashFromCaret();
+  };
+
+  // onInput wrapper: refresh the slash menu, then flush the change.
+  const handleEditorInput = () => {
+    updateSlashFromCaret();
+    emitChange();
+  };
+
+  // OS drag-and-drop of files. Tauri intercepts native file drops (the
+  // DOM `drop` event never sees the paths), so we subscribe to the
+  // webview's drag-drop event, which hands us absolute paths directly —
+  // exactly what the copy-free asset model needs.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        const un = await getCurrentWebview().onDragDropEvent((event) => {
+          const p = event.payload;
+          if (p.type !== "drop") return;
+          const el = editorRef.current;
+          if (!el) return;
+          // Drop position is in physical pixels; map to CSS px for DOM.
+          const dpr = window.devicePixelRatio || 1;
+          const cssX = p.position.x / dpr;
+          const cssY = p.position.y / dpr;
+          const rect = el.getBoundingClientRect();
+          const inside =
+            cssX >= rect.left && cssX <= rect.right &&
+            cssY >= rect.top && cssY <= rect.bottom;
+          if (!inside) return;
+          // Place the caret where the file was dropped (best-effort).
+          const caret = (document as Document & {
+            caretRangeFromPoint?: (x: number, y: number) => Range | null;
+          }).caretRangeFromPoint?.(cssX, cssY);
+          if (caret) {
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(caret);
+          }
+          focusEditor();
+          const media = p.paths.filter((path) => assetKindFromPath(path) != null);
+          if (media.length === 0) return;
+          for (const path of media) {
+            const html = buildAssetHtml(path);
+            if (html) {
+              try { document.execCommand("insertHTML", false, html + "<p><br></p>"); } catch { /* no-op */ }
+            }
+          }
+          resolveAssetSrcs(el);
+          emitChange();
+        });
+        if (disposed) un(); else unlisten = un;
+      } catch {
+        // Not running under Tauri (e.g. plain `vite` preview) — drag-drop
+        // simply stays inert; the toolbar button + /asset still work.
+      }
+    })();
+    return () => { disposed = true; unlisten?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── User-created templates (v0.9.7) ─────────────────────────────────
   //
@@ -585,101 +819,20 @@ export function MarkdownWorkspace({
         </div>
         <div className="notes-toolbar-divider" />
         <div className="notes-toolbar-group">
-          <ToolbarButton title="H1" onClick={() => formatBlock("h1")}>
-            <Heading1 size={14} />
-          </ToolbarButton>
-          <ToolbarButton title="H2" onClick={() => formatBlock("h2")}>
-            <Heading2 size={14} />
-          </ToolbarButton>
-          <ToolbarButton title={tr("Paragraph", "Paragraf")} onClick={() => formatBlock("p")}>
-            <span style={{ fontSize: 10, fontWeight: 700 }}>P</span>
-          </ToolbarButton>
-          <ToolbarButton title={tr("Quote", "Alıntı")} onClick={insertQuote}>
-            <Quote size={14} />
-          </ToolbarButton>
-        </div>
-        <div className="notes-toolbar-divider" />
-        <div className="notes-toolbar-group">
-          <ToolbarButton title={tr("Bullet list", "Madde işareti")} onClick={insertBullet}>
-            <List size={14} />
-          </ToolbarButton>
-          <ToolbarButton title={tr("Numbered list", "Numaralı liste")} onClick={insertNumbered}>
-            <ListOrdered size={14} />
-          </ToolbarButton>
-          <ToolbarButton title={tr("Checklist", "Görev listesi")} onClick={insertChecklist}>
-            <ListChecks size={14} />
-          </ToolbarButton>
-          <ToolbarButton title={tr("Table", "Tablo")} onClick={() => insertTable()}>
-            <TableIcon size={14} />
-          </ToolbarButton>
-          <div className="notes-toolbar-callout-wrap">
-            <button
-              type="button"
-              className="note-tool-btn"
-              title={tr("Code block (pick language)", "Kod bloğu (dil seç)")}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setCodeLangOpen((o) => !o)}
-            >
-              <Code2 size={14} />
-            </button>
-            {codeLangOpen && (
-              <div className="notes-toolbar-callout-menu notes-toolbar-codelang-menu" role="menu">
-                {SUPPORTED_LANGUAGES.map((l) => (
-                  <button
-                    key={l.id}
-                    type="button"
-                    className="notes-toolbar-callout-item"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => { insertCode(l.id); setCodeLangOpen(false); }}
-                  >
-                    <span style={{ width: 12, textAlign: "center", fontSize: 9, fontWeight: 700, color: "#94a3b8" }}>{l.id.slice(0,2).toUpperCase()}</span>
-                    {l.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <ToolbarButton title={tr("Toggle list", "Açılır liste")} onClick={insertToggle}>
-            <ChevronRightIcon size={14} />
-          </ToolbarButton>
-          <ToolbarButton title={tr("Insert database", "Tablo (database) ekle")} onClick={insertDatabase}>
-            <DatabaseIcon size={14} />
-          </ToolbarButton>
-          <div className="notes-toolbar-callout-wrap">
-            <button
-              type="button"
-              className="note-tool-btn"
-              title={tr("Callout", "Bilgi kutusu")}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setCalloutOpen((o) => !o)}
-            >
-              <MessageSquareWarning size={14} />
-            </button>
-            {calloutOpen && (
-              <div className="notes-toolbar-callout-menu" role="menu">
-                <button type="button" className="notes-toolbar-callout-item tone-info"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { insertCallout("info"); setCalloutOpen(false); }}>
-                  <Info size={12} />{tr("Note", "Not")}
-                </button>
-                <button type="button" className="notes-toolbar-callout-item tone-ok"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { insertCallout("ok"); setCalloutOpen(false); }}>
-                  <CheckCircle2 size={12} />{tr("Tip", "İpucu")}
-                </button>
-                <button type="button" className="notes-toolbar-callout-item tone-warn"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { insertCallout("warn"); setCalloutOpen(false); }}>
-                  <AlertTriangle size={12} />{tr("Warning", "Uyarı")}
-                </button>
-                <button type="button" className="notes-toolbar-callout-item tone-danger"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => { insertCallout("danger"); setCalloutOpen(false); }}>
-                  <AlertOctagon size={12} />{tr("Danger", "Tehlike")}
-                </button>
-              </div>
-            )}
-          </div>
+          {/* v0.9.8 — block inserts moved into the slash command menu.
+              This button seeds a "/" and opens it; users can also just
+              type "/" anywhere in the document. */}
+          <button
+            type="button"
+            className="note-tool-btn note-tool-insert"
+            title={tr("Insert block — or type / in the editor", "Blok ekle — ya da editörde / yaz")}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={openSlashMenu}
+          >
+            <Plus size={14} />
+            <span className="note-tool-insert-text">{tr("Insert", "Ekle")}</span>
+            <kbd className="note-tool-insert-kbd">/</kbd>
+          </button>
           <ToolbarButton
             title={tr("Table of Contents", "İçindekiler")}
             onClick={() => setTocOpen((o) => !o)}
@@ -816,15 +969,19 @@ export function MarkdownWorkspace({
           suppressContentEditableWarning
           spellCheck={false}
           data-placeholder={placeholderTxt}
-          onInput={emitChange}
+          onInput={handleEditorInput}
           onBlur={(e) => {
             emitChange();
-            // Re-highlight every code block after the user stops
-            // editing. Skip if the blur came from focus jumping to a
-            // child of the editor (e.g. between toolbar buttons) —
-            // those are handled by their own onMouseDown preventDefault.
+            // Re-highlight code after the user stops editing. Skip if
+            // the blur came from focus jumping to a child of the editor
+            // (e.g. between toolbar buttons) — those are handled by
+            // their own onMouseDown preventDefault.
             if (!editorRef.current?.contains(e.relatedTarget as Node | null)) {
               queueHighlight();
+            }
+            // Close the slash menu when focus genuinely leaves the editor.
+            if (!editorRef.current?.contains(e.relatedTarget as Node | null)) {
+              setSlash(null);
             }
           }}
           // Click delegate for in-editor widgets:
@@ -857,6 +1014,32 @@ export function MarkdownWorkspace({
             }
           }}
           onKeyDown={(e) => {
+            // Slash menu navigation takes priority while it's open.
+            if (slash) {
+              const items = filteredSlash();
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setSlashIndex((i) => (items.length ? (i + 1) % items.length : 0));
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setSlashIndex((i) => (items.length ? (i - 1 + items.length) % items.length : 0));
+                return;
+              }
+              if (e.key === "Enter") {
+                if (items.length) {
+                  e.preventDefault();
+                  runSlashCommand(items[Math.min(slashIndex, items.length - 1)]);
+                  return;
+                }
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setSlash(null);
+                return;
+              }
+            }
             // Some sane defaults: Tab inserts a real tab character
             // rather than navigating focus away from the editor.
             if (e.key === "Tab" && !e.shiftKey) {
@@ -866,6 +1049,45 @@ export function MarkdownWorkspace({
             }
           }}
         />
+
+        {/* ── Slash command palette (v0.9.8) ──────────────────────── */}
+        {/* Portaled to <body> so the fixed positioning is relative to the
+            viewport, not to NoteCenter's transformed (framer-motion)
+            ancestor — which would otherwise offset the menu. */}
+        {slash && createPortal((() => {
+          const items = filteredSlash();
+          return (
+            <div
+              className="note-slash-menu"
+              style={{ top: slash.top, left: slash.left }}
+              role="listbox"
+            >
+              {items.length === 0 ? (
+                <div className="note-slash-empty">
+                  {tr("No matching command", "Eşleşen komut yok")}
+                </div>
+              ) : (
+                items.map((cmd, i) => (
+                  <button
+                    key={cmd.id}
+                    type="button"
+                    role="option"
+                    aria-selected={i === slashIndex}
+                    className={`note-slash-item ${i === slashIndex ? "is-active" : ""}`}
+                    // Keep the editor selection alive so runSlashCommand can
+                    // delete the "/token" and insert at the right caret.
+                    onMouseDown={(ev) => ev.preventDefault()}
+                    onMouseEnter={() => setSlashIndex(i)}
+                    onClick={() => runSlashCommand(cmd)}
+                  >
+                    <span className="note-slash-hint">{cmd.hint}</span>
+                    <span className="note-slash-label">{cmd.label}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          );
+        })(), document.body)}
       </div>
       {/* Suppress the ui param's typed shape — the consumer uses
           `as { notesPreviewEmpty?: string }` style access elsewhere

@@ -59,6 +59,15 @@ export function ConflictDialog({ remoteSig, localSig, onResolve, onClose }: Prop
 
   const handleKeep = async () => {
     setBusy(true);
+    // v0.9.7 review fix #6: "Keep local" previously left teamSync's
+    // last-seen manifest untouched, so the very next poll detected
+    // the same divergence and re-opened the dialog. Re-baseline the
+    // sync orchestrator against the *current* disk state and the
+    // next save will legitimately overwrite the remote.
+    try {
+      const { acceptCurrentAsBaseline } = await import("../../lib/teamSync");
+      await acceptCurrentAsBaseline();
+    } catch { /* best-effort */ }
     onResolve("keepLocal");
     setBusy(false);
   };

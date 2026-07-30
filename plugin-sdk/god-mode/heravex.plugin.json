@@ -1,0 +1,15 @@
+{
+  "id": "god-mode",
+  "name": "God Mode ⚡",
+  "description": "Sınırsız Güç katmanının dört damarını da (DOM/tema, editör, hook, hotkey/menü) canlı gösteren vitrin + test eklentisi.",
+  "version": "1.0.0",
+  "author": "HeraVex",
+  "apiVersion": 1,
+  "entry": "index.js",
+  "permissions": ["readGames", "dom", "editor", "hooks", "input", "storage"],
+  "contributes": {
+    "pages": [{ "id": "console", "title": "God Console", "icon": "Sparkles" }],
+    "commands": [{ "id": "toggle-neon", "title": "God Mode: Neon temayı aç/kapat" }],
+    "settings": [{ "id": "prefs", "title": "God Mode" }]
+  }
+}

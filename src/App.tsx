@@ -34,6 +34,7 @@ const importAnalytics  = () => import("./components/pages/Analytics");
 const importProfile    = () => import("./components/pages/Profile");
 const importStoreHub   = () => import("./components/pages/StoreHub");
 const importNoteCenter = () => import("./components/pages/NoteCenter");
+const importFlowCenter = () => import("./components/pages/FlowCenter");
 
 const GameDetail = lazy(() => importGameDetail().then((m) => ({ default: m.GameDetail })));
 const TaskCenter = lazy(() => importTaskCenter().then((m) => ({ default: m.TaskCenter })));
@@ -43,6 +44,7 @@ const Analytics  = lazy(() => importAnalytics().then((m) => ({ default: m.Analyt
 const Profile    = lazy(() => importProfile().then((m) => ({ default: m.Profile })));
 const StoreHub   = lazy(() => importStoreHub().then((m) => ({ default: m.StoreHub })));
 const NoteCenter = lazy(() => importNoteCenter().then((m) => ({ default: m.NoteCenter })));
+const FlowCenter = lazy(() => importFlowCenter().then((m) => ({ default: m.FlowCenter })));
 
 /** Warm the chunk cache during browser idle time so the first nav to a
  *  lazy page paints instantly. Order matches "most likely next page"
@@ -53,7 +55,7 @@ function prefetchPages() {
   const order = [
     importGameDetail, importAnalytics,
     importTaskCenter, importNoteCenter,
-    importWallet,     importStoreHub,
+    importFlowCenter, importWallet,     importStoreHub,
     importCalendar,   importProfile,
   ];
   const win = window as unknown as { requestIdleCallback?: (cb: () => void) => void };
@@ -76,6 +78,11 @@ import { AutoLockOverlay } from "./components/AutoLockOverlay";
 import { PerformanceMonitor } from "./components/PerformanceMonitor";
 import { QuickCaptureWidget } from "./components/QuickCaptureWidget";
 import { BusyIndicator } from "./components/BusyIndicator";
+import { PluginPageHost } from "./components/PluginPageHost";
+import { initPlugins } from "./lib/plugins";
+
+// Throttle for the "synced from team" toast (module scope — App is a singleton).
+let lastRemoteToastAt = 0;
 
 export default function App() {
   const { init, refreshGames, isLoading, games, workspaceTab, selectedId, toasts, language, ui, showToast } = useAppStore();
@@ -96,7 +103,6 @@ export default function App() {
   const [showPalette, setShowPalette] = useState<false | "actions" | "search">(false);
   const [showNewWorkspace, setShowNewWorkspace] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
-  const remoteNotifiedRef = useRef(false);
 
   const { setWorkspaceTab } = useAppStore.getState();
 
@@ -324,147 +330,61 @@ export default function App() {
     return () => window.removeEventListener("heravex:start-tutorial", onStart);
   }, []);
 
-  // ── Workspace sync — handles remote changes from shared folders.
-  //
-  // Two complementary signals feed the same toast:
-  //   1. The Rust `workspace-updated` event (fires when the OS filesystem
-  //      notifier picks up a change — works on local disks).
-  //   2. A frontend polling loop that calls `compute_workspace_signature`
-  //      on the interval the user picked in Team Mode → Watcher delay.
-  //      This is the cloud-sync fallback: Drive/OneDrive/Dropbox often
-  //      land files via placeholders that don't trigger notify events,
-  //      so a periodic fingerprint check is the only reliable path.
-  //
-  // Never auto-overwrites local edits — the user opts in via "Refresh".
-  // Modules that own their own data (NoteCenter, TaskCenter, Calendar)
-  // listen for the `heravex:remote-changed` window event so they can
-  // re-fetch their slices when the user accepts.
-  const teamModePrefs = useAppStore((s) => s.teamMode);
-  const watcherDelayMs = (() => {
-    switch (teamModePrefs.watcherDelay) {
-      case "instant": return 3000;
-      case "5s":      return 5000;
-      case "30s":     return 30000;
-      case "2m":      return 120000;
-      default:        return 5000;
-    }
-  })();
+  // Discover + activate installed plugins once at startup. Later
+  // installs/toggles re-run initPlugins() from the Settings page.
+  useEffect(() => { void initPlugins(); }, []);
 
-  // Conflict dialog state — only used when conflictStrategy === "manualMerge".
-  const [conflict, setConflict] = useState<{ local: string; remote: string } | null>(null);
-
-  const surfaceRemoteToast = useRef<(prev: string, next: string) => void>(() => {});
+  // Suppress the WebView's native right-click menu (Back / Reload / Save
+  // as…) app-wide — it clashes with our custom context menus (e.g. Flow
+  // Center). Editable fields keep their native menu for copy/paste.
+  // v0.9.9: the same interception point now doubles as the PLUGIN
+  // context-menu layer — when a plugin registered items matching the
+  // right-click target, a themed menu opens instead of a bare suppress.
   useEffect(() => {
-    surfaceRemoteToast.current = (prev: string, next: string) => {
-      if (remoteNotifiedRef.current) return;
-      remoteNotifiedRef.current = true;
-
-      const broadcastRefresh = () => {
-        void refreshGames();
-        window.dispatchEvent(new CustomEvent("heravex:remote-changed"));
-        window.dispatchEvent(new CustomEvent("heravex:notes-updated"));
-      };
-
-      switch (teamModePrefs.conflictStrategy) {
-        case "manualMerge": {
-          // Open the side-by-side dialog. Toast is suppressed because
-          // the dialog itself is the surface; the dedupe ref will be
-          // released by the dialog's resolve/close handlers.
-          setConflict({ local: prev, remote: next });
-          break;
-        }
-        case "autoMerge": {
-          // No prompt — just silently reload from disk and tell the
-          // user via a short success toast that we synced.
-          broadcastRefresh();
-          showToast(
-            language === "tr" ? "Uzaktaki değişiklikler alındı." : "Remote changes synced.",
-            "success",
-          );
-          remoteNotifiedRef.current = false;
-          break;
-        }
-        case "lastWriterWins":
-        default: {
-          // Original behaviour — toast + manual refresh button.
-          showToast(
-            language === "tr"
-              ? "Uzakta değişiklikler var."
-              : "Remote changes detected.",
-            "info",
-            () => {
-              broadcastRefresh();
-              remoteNotifiedRef.current = false;
-            },
-            language === "tr" ? "Yenile" : "Refresh",
-          );
-        }
+    const onCtx = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest('input, textarea, [contenteditable="true"], [contenteditable=""]')) return;
+      // Flow Center (and other in-app menus) preventDefault at the React
+      // layer, which runs before this document listener — don't stack a
+      // plugin menu on top of theirs.
+      const alreadyHandled = e.defaultPrevented;
+      e.preventDefault();
+      if (!alreadyHandled) {
+        void import("./lib/plugins").then((m) => m.openPluginContextMenu(e));
       }
-      // Re-arm after 8s so subsequent change bursts can re-notify.
-      setTimeout(() => { remoteNotifiedRef.current = false; }, 8000);
     };
-  }, [language, refreshGames, showToast, teamModePrefs.conflictStrategy]);
-
-  useEffect(() => {
-    let unlisten: UnlistenFn | null = null;
-    void (async () => {
-      unlisten = await listen("workspace-updated", async () => {
-        try {
-          const wp = await import("./lib/storage").then((m) => m.getWorkspacePath());
-          if (!wp) return; // Team Mode off — ignore.
-        } catch { /* if path lookup fails just allow the toast */ }
-        // Watcher event doesn't carry the signature — pass blanks so
-        // the conflict dialog still has something to render.
-        const prev = localStorage.getItem("heravex_last_sync_sig") ?? "";
-        surfaceRemoteToast.current(prev, prev);
-      });
-    })();
-    return () => { if (unlisten) unlisten(); };
+    document.addEventListener("contextmenu", onCtx);
+    return () => document.removeEventListener("contextmenu", onCtx);
   }, []);
 
-  // Polling loop — frontend fingerprint check. Cheap (one Tauri call)
-  // and the only way to catch cloud-synced writes from another machine.
+  // ── Workspace sync — v0.9.7 rewrite ──────────────────────────────
+  //
+  // The previous loop polled a single global signature hash and
+  // surfaced a blocking "remote changes detected" toast/dialog for
+  // any file change anywhere in the folder — which interrupted
+  // editing and required a full `refreshGames` reload. The new
+  // `teamSync` module polls a per-file manifest, diffs successive
+  // snapshots, and dispatches *targeted* events:
+  //   • heravex:notes-file-changed   — handled by NoteCenter
+  //   • heravex:members-file-changed — handled by Sidebar / panel
+  //   • heravex:games-list-changed   — handled by the store
+  // Each handler re-fetches just its own slice — no full reload, no
+  // modal mid-edit.
+  //
+  // The store hooks below ALSO kicks off the team-sync orchestrator
+  // and a 30s members-heartbeat so other clients can see this user
+  // come online.
+  const profileSlice2 = useAppStore((s) => s.profile);
+  const studioIdentity2 = useAppStore((s) => s.studioIdentity);
+  const userAvatarPath2 = useAppStore((s) => s.avatarPath);
   useEffect(() => {
+    if (isLoading) return;
     let cancelled = false;
-    let lastSig: string | null = null;
-    // Track consecutive poll failures. Production builds previously
-    // dropped these on the floor (dev-only console.warn), so a silently
-    // broken Team Mode would never reach the user. After N back-to-back
-    // failures we surface a single sticky toast and back off until the
-    // next success resets the counter.
-    let failStreak = 0;
-    let notifiedDown = false;
-    const FAIL_THRESHOLD = 3;
-    const tick = async () => {
-      try {
-        const wp = await import("./lib/storage").then((m) => m.getWorkspacePath());
-        if (!wp) return; // Team Mode off — no point polling.
-        const { invoke } = await import("./lib/invokeWrapper");
-        const sig = await invoke<string>("compute_workspace_signature");
-        // Surface the timestamp so the Team Mode settings page can show
-        // "last checked X ago" — purely a UX read-out.
-        try {
-          localStorage.setItem("heravex_last_sync_check", String(Date.now()));
-          localStorage.setItem("heravex_last_sync_sig",   sig);
-        } catch { /* quota */ }
-        if (failStreak > 0) {
-          failStreak = 0;
-          notifiedDown = false;
-        }
-        if (lastSig === null) { lastSig = sig; return; }
-        if (sig !== lastSig) {
-          const prev = lastSig;
-          lastSig = sig;
-          surfaceRemoteToast.current(prev, sig);
-        }
-      } catch (err) {
-        if (cancelled) return;
-        failStreak++;
-        const isDev = import.meta.env.DEV;
-        if (isDev) console.warn("[team-mode] poll failed:", err);
-        if (failStreak >= FAIL_THRESHOLD && !notifiedDown) {
-          notifiedDown = true;
-          // One toast per outage. Cleared the next successful tick.
+    void (async () => {
+      const { startTeamSync, stopTeamSync } = await import("./lib/teamSync");
+      if (cancelled) return;
+      startTeamSync({
+        onSyncDown: () => {
           const { showToast: toast, language: lang } = useAppStore.getState();
           toast(
             lang === "tr"
@@ -472,20 +392,70 @@ export default function App() {
               : "Team mode sync is currently failing.",
             "warning",
           );
-        }
-      }
+        },
+        onSyncBackUp: () => {
+          // Don't toast — silent recovery is better UX than a chirp.
+        },
+        getIdentity: () => {
+          const displayName = profileSlice2.displayName?.trim()
+            || studioIdentity2.studioName?.trim()
+            || (language === "tr" ? "İsimsiz" : "Anonymous");
+          return { displayName, avatarPath: userAvatarPath2 || null };
+        },
+        onRemoteChange: () => {
+          // Teammate edited games/notes/flows → the targeted refresh
+          // events already fired; surface a gentle toast too (throttled
+          // so a burst of synced files doesn't spam).
+          const now = Date.now();
+          if (now - lastRemoteToastAt < 6000) return;
+          lastRemoteToastAt = now;
+          const { showToast: toast, language: lang } = useAppStore.getState();
+          toast(lang === "tr" ? "Ekipten değişiklikler eşitlendi." : "Synced changes from your team.", "info");
+        },
+      });
+      // The Settings page "Check now" button still fires this event.
+      const onForce = () => {
+        void import("./lib/teamSync").then((m) => m.forceSyncCheck());
+      };
+      window.addEventListener("heravex:force-sync-check", onForce);
+      return () => {
+        window.removeEventListener("heravex:force-sync-check", onForce);
+        stopTeamSync();
+      };
+    })();
+    return () => { cancelled = true; };
+  }, [isLoading, profileSlice2.displayName, studioIdentity2.studioName, userAvatarPath2, language]);
+
+  // Old Rust workspace-updated event — kept as a free signal for the
+  // local-disk case (`notify` watcher fires when files change on the
+  // host filesystem). When it fires we just kick the team-sync poller
+  // to run sooner — no separate UI handler.
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    void (async () => {
+      unlisten = await listen("workspace-updated", async () => {
+        const { forceSyncCheck } = await import("./lib/teamSync");
+        await forceSyncCheck();
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  // Silent refresh handlers — the team-sync orchestrator fires these
+  // when a teammate's save touches the relevant file. We re-fetch
+  // the affected slice WITHOUT bouncing the loading screen so the
+  // user keeps editing without interruption.
+  useEffect(() => {
+    const onGamesChanged = () => {
+      void useAppStore.getState().refreshGames(undefined, { silent: true });
     };
-    void tick(); // prime immediately
-    const id = window.setInterval(() => { if (!cancelled) void tick(); }, watcherDelayMs);
-    // Manual force-check from the Team Mode settings page.
-    const onForce = () => { void tick(); };
-    window.addEventListener("heravex:force-sync-check", onForce);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-      window.removeEventListener("heravex:force-sync-check", onForce);
-    };
-  }, [watcherDelayMs]);
+    window.addEventListener("heravex:games-list-changed", onGamesChanged);
+    return () => window.removeEventListener("heravex:games-list-changed", onGamesChanged);
+  }, []);
+
+  // Conflict dialog kept but only opened when something else calls it
+  // (manualMerge strategy). Default is autoMerge — silent reload.
+  const [conflict, setConflict] = useState<{ local: string; remote: string } | null>(null);
 
   if (isLoading) {
     return (
@@ -540,6 +510,8 @@ export default function App() {
               {workspaceTab === "storehub" && <StoreHub />}
               {workspaceTab === "tasks" && <TaskCenter />}
               {workspaceTab === "notes" && <NoteCenter />}
+              {workspaceTab === "flow" && <FlowCenter />}
+              {workspaceTab.startsWith("plugin:") && <PluginPageHost tabKey={workspaceTab} />}
               {workspaceTab === "calendar" && <Calendar />}
               {workspaceTab === "wallet" && <Wallet />}
               {workspaceTab === "analytics" && <Analytics />}
@@ -589,14 +561,15 @@ export default function App() {
           <ConflictDialog
             localSig={conflict.local}
             remoteSig={conflict.remote}
-            onClose={() => {
-              setConflict(null);
-              remoteNotifiedRef.current = false;
-            }}
+            onClose={() => setConflict(null)}
             onResolve={(choice) => {
               if (choice === "takeRemote") {
-                window.dispatchEvent(new CustomEvent("heravex:remote-changed"));
-                window.dispatchEvent(new CustomEvent("heravex:notes-updated"));
+                // Tell granular surfaces to silently re-fetch; the new
+                // team-sync orchestrator dispatches per-file events
+                // automatically on the next manifest tick, this just
+                // wakes them sooner.
+                window.dispatchEvent(new CustomEvent("heravex:notes-file-changed"));
+                window.dispatchEvent(new CustomEvent("heravex:members-file-changed"));
                 showToast(
                   language === "tr" ? "Uzaktaki sürüm uygulandı." : "Remote version applied.",
                   "success",
@@ -610,7 +583,6 @@ export default function App() {
                 );
               }
               setConflict(null);
-              remoteNotifiedRef.current = false;
             }}
           />
         )}

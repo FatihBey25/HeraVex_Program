@@ -50,6 +50,7 @@ const SECTION_KEYWORDS: Record<SettingsSection, string[]> = {
   apiKeys:       ["api", "token", "key", "anahtar", "steam", "itch", "google"],
   teamMode:      ["team", "ekip", "sync", "senkron", "watcher", "conflict", "merge"],
   webhooks:      ["webhook", "discord", "github"],
+  plugins:       ["plugin", "eklenti", "extension", "install", "yükle", "widget", "addon", "mod"],
   privacy:       ["privacy", "gizlilik", "screenshot", "lock", "auto-lock"],
   experimental:  ["experimental", "deneysel", "beta", "log"],
   about:         ["about", "version", "sürüm", "release", "license", "feedback"],

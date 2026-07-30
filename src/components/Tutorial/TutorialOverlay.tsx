@@ -403,27 +403,51 @@ function renderInline(s: string): string {
 }
 
 /**
- * Tutorial visibility is now data-driven: we only auto-open on app start when
- * the workspace has no games (i.e. genuinely fresh install or post-reset).
- * The legacy localStorage "completed" flag is no longer the trigger — but we
- * keep the session-scoped dismissal in memory via `dismissedThisSession` so a
- * user who skips it isn't badgered until they reload the app.
+ * Tutorial visibility (v0.9.8 fix — lifetime-once).
+ *
+ * The bug: the overlay auto-opened on *every* launch whenever the
+ * workspace had no games, because the only "seen" signal was the
+ * in-memory `dismissedThisSession` flag — wiped on each app restart.
+ * Opening a fresh workspace (or simply not having added a game yet)
+ * therefore re-triggered the tour again and again.
+ *
+ * The fix: persist a single global flag in `localStorage`. localStorage
+ * is keyed by the WebView origin, NOT by the workspace folder, so it
+ * survives app restarts AND workspace switches — exactly the "see it
+ * once in a lifetime" semantics we want. The flag is written the moment
+ * the user finishes OR dismisses the tour (any exit counts as "seen").
+ *
+ * `dismissedThisSession` is kept only as a cheap in-memory short-circuit
+ * so we don't hit localStorage on every render within a session.
  */
 let dismissedThisSession = false;
 
+function hasSeenTutorial(): boolean {
+  try { return localStorage.getItem(COMPLETED_KEY) === "1"; } catch { return false; }
+}
+
 export function shouldShowTutorial(hasAnyData: boolean): boolean {
-  if (hasAnyData) return false;
-  return !dismissedThisSession;
+  // Persistent gate first: once seen (finished or skipped) in any prior
+  // session or workspace, never auto-open again.
+  if (hasSeenTutorial()) return false;
+  if (dismissedThisSession) return false;
+  // First run only: don't ambush a user who already has games (e.g.
+  // restored from a backup before the tour ever ran).
+  return !hasAnyData;
 }
 
 export function markTutorialDismissed(): void {
   dismissedThisSession = true;
+  // Persist the lifetime "seen" flag. Wrapped because localStorage can
+  // throw under private-mode / quota — a failed write just means the
+  // session-scoped flag still suppresses re-opens until the next launch.
+  try { localStorage.setItem(COMPLETED_KEY, "1"); } catch {}
 }
 
 export function resetTutorial(): void {
-  // Used by "Restart tutorial" button in Profile. Clears both the legacy
-  // completed flag (in case it was set in an older build) and the session
-  // dismissal so the overlay opens immediately on next request.
+  // Used by "Restart tutorial" button in Profile. Clears both the
+  // persistent completed flag and the session dismissal so the overlay
+  // opens immediately on next request.
   dismissedThisSession = false;
   try { localStorage.removeItem(COMPLETED_KEY); } catch {}
 }

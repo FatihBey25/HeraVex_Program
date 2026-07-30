@@ -47,7 +47,21 @@
       "Bash(cp /tmp/mwclean.tsx \"C:/HereVexProgram/src/components/shared/MarkdownWorkspace.tsx\" && file \"C:/HereVexProgram/src/components/shared/MarkdownWorkspace.tsx\")",
       "Bash(echo \"exit=$?\")",
       "Bash(node -e \"console.log\\(require\\('highlight.js/package.json'\\).version\\)\")",
-      "Bash(echo \"---TSC EXIT=$?\")"
+      "Bash(echo \"---TSC EXIT=$?\")",
+      "Bash(cargo build *)",
+      "Bash(echo \"TS exit=$?\")",
+      "Bash(awk -F: '$1 > 2585')",
+      "PowerShell(npm install mermaid@^11.4.1 --no-audit --no-fund 2>&1)",
+      "PowerShell(npx tsc --noEmit 2>&1)",
+      "PowerShell(cargo check --manifest-path src-tauri/Cargo.toml 2>&1)",
+      "PowerShell(npm uninstall mermaid --no-audit --no-fund 2>&1)",
+      "PowerShell(npm run build 2>&1)",
+      "PowerShell(npm view @xyflow/react version peerDependencies 2>&1)",
+      "PowerShell(npm install @xyflow/react@^12.11.1 --no-audit --no-fund 2>&1)",
+      "Bash(tasklist)",
+      "Bash(netstat -ano)",
+      "PowerShell(npm install html-to-image@^1.11.13 @dagrejs/dagre@^1.1.4 --no-audit --no-fund 2>&1)",
+      "Bash(git rm *)"
     ]
   }
 }

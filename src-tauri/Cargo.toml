@@ -1,6 +1,6 @@
 [package]
 name = "studio_hub"
-version = "0.9.7"
+version = "0.9.8"
 description = "HeraVex desktop shell"
 authors = ["mucah"]
 edition = "2021"

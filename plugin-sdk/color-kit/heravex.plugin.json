@@ -1,0 +1,19 @@
+{
+  "id": "color-kit",
+  "name": "Color Kit",
+  "description": "Oyun bazlı renk paletleri oluştur, harmony analizi yap, CSS/Unity/Godot/Unreal formatında dışa aktar.",
+  "version": "1.0.0",
+  "author": "HeraVex",
+  "apiVersion": 1,
+  "entry": "index.js",
+  "permissions": ["readGames", "storage"],
+  "contributes": {
+    "pages": [{ "id": "palettes", "title": "Color Kit", "icon": "Sparkles" }],
+    "widgets": [{ "id": "palette-mini", "slot": "dashboard" }],
+    "commands": [
+      { "id": "random-palette", "title": "Rastgele palet üret" },
+      { "id": "export-clipboard", "title": "Paleti panoya kopyala" }
+    ],
+    "settings": [{ "id": "color-prefs", "title": "Color Kit Ayarları" }]
+  }
+}

@@ -15,6 +15,7 @@ import type {
   StoreGameInfo,
   StoreProvider
 } from "../types";
+import type { Flow } from "./flow";
 
 export const STATUSES: GameStatus[] = [
   "Fikir",
@@ -36,8 +37,22 @@ export async function createGame(input: CreateGameInput) {
   return invoke<GameRecord>("create_game", { input });
 }
 
+// Plugin hook bus — storage.ts is the single choke point every
+// game/note write flows through (store actions, NoteCenter, quick
+// capture, plugins' own hv.saveNote), so intercepting here covers the
+// whole app. `before*` filters may transform the payload or return
+// null to BLOCK; blocking throws so each caller's existing error
+// toast surfaces the reason instead of failing silently.
+import { applyHookFilters, emitHookEvent } from "./pluginHooks";
+
+const BLOCKED_MSG = "Islem bir eklenti tarafindan engellendi (plugin blocked).";
+
 export async function saveGame(game: GameRecord) {
-  return invoke<GameRecord>("save_game", { game });
+  const filtered = await applyHookFilters("game:beforeSave", game);
+  if (filtered === null) throw new Error(BLOCKED_MSG);
+  const saved = await invoke<GameRecord>("save_game", { game: filtered });
+  emitHookEvent("game:afterSave", saved);
+  return saved;
 }
 
 export async function addVersionWithBuild(
@@ -97,7 +112,10 @@ export async function saveCurrencyLabels(label1: string, label2: string) {
 }
 
 export async function deleteGame(gameId: string) {
-  return invoke<void>("delete_game", { gameId });
+  const filtered = await applyHookFilters("game:beforeDelete", gameId);
+  if (filtered === null) throw new Error(BLOCKED_MSG);
+  await invoke<void>("delete_game", { gameId });
+  emitHookEvent("game:afterDelete", gameId);
 }
 
 export async function saveReleaseTemplate(template: ReleaseTemplateItem[]) {
@@ -243,11 +261,36 @@ export async function getAllNotes() {
 }
 
 export async function saveNote(note: NoteRecord) {
-  return invoke<NoteRecord>("save_note", { note });
+  const filtered = await applyHookFilters("note:beforeSave", note);
+  if (filtered === null) throw new Error(BLOCKED_MSG);
+  const saved = await invoke<NoteRecord>("save_note", { note: filtered });
+  emitHookEvent("note:afterSave", saved);
+  return saved;
+}
+
+/** Read one note straight off disk (for the team-mode 3-way merge). */
+export async function readNote(noteId: string) {
+  return invoke<NoteRecord | null>("read_note", { noteId });
 }
 
 export async function deleteNote(noteId: string) {
-  return invoke<void>("delete_note", { noteId });
+  const filtered = await applyHookFilters("note:beforeDelete", noteId);
+  if (filtered === null) throw new Error(BLOCKED_MSG);
+  await invoke<void>("delete_note", { noteId });
+  emitHookEvent("note:afterDelete", noteId);
+}
+
+// ── Flow Center (v0.9.8) ────────────────────────────────────────────
+export async function loadFlows() {
+  return invoke<Flow[]>("load_flows");
+}
+
+export async function saveFlow(flow: Flow) {
+  return invoke<Flow>("save_flow", { flow });
+}
+
+export async function deleteFlow(flowId: string) {
+  return invoke<void>("delete_flow", { flowId });
 }
 
 export async function exportGlobalNotePdf(noteId: string) {

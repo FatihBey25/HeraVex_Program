@@ -43,6 +43,7 @@ export function getResetHandler(section: SettingsSection): (() => void) | null {
     case "importExport":
     case "apiKeys":
     case "about":
+    case "plugins":
       return null;
   }
 }
@@ -81,6 +82,7 @@ export function getExportPayload(
     case "importExport":
     case "apiKeys":
     case "about":
+    case "plugins":
       return null;
   }
 }

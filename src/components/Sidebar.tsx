@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   LayoutDashboard,
@@ -21,7 +21,14 @@ import {
   ExternalLink,
   Users,
   Crown,
+  Workflow,
+  Puzzle,
+  Sparkles,
+  Wrench,
+  FileText,
+  type LucideIcon,
 } from "lucide-react";
+import { getPluginPages, type PluginPageItem } from "../lib/plugins";
 import { useAppStore, type WorkspaceTab } from "../store";
 import { StudioHubLogo } from "./shared/StudioHubLogo";
 import { imgSrc } from "../lib/images";
@@ -199,29 +206,70 @@ export function Sidebar({
   // Both are cheap reads only triggered when the dropdown actually
   // opens, so closed-state performance is unaffected.
   const liveGameCount = useAppStore((s) => s.games.length);
-  const [activeTeam, setActiveTeam] = useState<{ memberCount: number; myRole: "leader" | "member" | "banned" | null } | null>(null);
-  useEffect(() => {
-    if (!wsOpen || activeWs.mode !== "team" || !activeWs.path) {
+  type ActiveTeamState = {
+    memberCount: number;
+    myRole: "leader" | "member" | "banned" | null;
+    members: { userId: string; displayName: string; role: "leader" | "member" | "banned"; lastSeenAt: string; avatarPath?: string | null }[];
+  };
+  const [activeTeam, setActiveTeam] = useState<ActiveTeamState | null>(null);
+  // The dropdown stays closed most of the time, but with live presence
+  // we want a tiny "online dot" indicator visible on the closed brand
+  // chip too. So the fetch fires whenever the active workspace is a
+  // team folder (regardless of dropdown state) and refreshes on the
+  // members-changed events the team-sync heartbeat fires.
+  const refreshActiveTeam = useCallback(async () => {
+    if (activeWs.mode !== "team" || !activeWs.path) {
       setActiveTeam(null);
       return;
     }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { readMembers, selfUserId } = await import("../lib/teamMembers");
-        const doc = await readMembers(activeWs.path!);
-        if (cancelled) return;
-        const me = doc.members.find((m) => m.userId === selfUserId());
-        setActiveTeam({
-          memberCount: doc.members.length,
-          myRole: me?.role ?? null,
-        });
-      } catch {
-        if (!cancelled) setActiveTeam({ memberCount: 0, myRole: null });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [wsOpen, activeWs.id, activeWs.path, activeWs.mode]);
+    try {
+      const { readMembers, selfUserId } = await import("../lib/teamMembers");
+      const doc = await readMembers(activeWs.path!);
+      const me = doc.members.find((m) => m.userId === selfUserId());
+      setActiveTeam({
+        memberCount: doc.members.length,
+        myRole: me?.role ?? null,
+        members: doc.members.map((m) => ({
+          userId: m.userId,
+          displayName: m.displayName,
+          role: m.role,
+          lastSeenAt: m.lastSeenAt,
+          avatarPath: m.avatarPath ?? null,
+        })),
+      });
+    } catch {
+      setActiveTeam({ memberCount: 0, myRole: null, members: [] });
+    }
+  }, [activeWs.mode, activeWs.path]);
+  useEffect(() => { void refreshActiveTeam(); }, [refreshActiveTeam]);
+  useEffect(() => {
+    const onChange = () => void refreshActiveTeam();
+    window.addEventListener("heravex:team-members-changed", onChange);
+    window.addEventListener("heravex:members-file-changed", onChange);
+    return () => {
+      window.removeEventListener("heravex:team-members-changed", onChange);
+      window.removeEventListener("heravex:members-file-changed", onChange);
+    };
+  }, [refreshActiveTeam]);
+
+  // Tick once per second while the dropdown is open so the online
+  // chip stays accurate without a Zustand subscription.
+  const [presenceTickN, setPresenceTickN] = useState(0);
+  useEffect(() => {
+    if (!wsOpen || activeWs.mode !== "team") return;
+    const id = window.setInterval(() => setPresenceTickN((n) => n + 1), 30 * 1000);
+    return () => window.clearInterval(id);
+  }, [wsOpen, activeWs.mode]);
+  const onlineMembers = (() => {
+    void presenceTickN;
+    if (!activeTeam) return [] as ActiveTeamState["members"];
+    const now = Date.now();
+    return activeTeam.members.filter((m) => {
+      if (m.role === "banned") return false;
+      const t = Date.parse(m.lastSeenAt);
+      return Number.isFinite(t) && (now - t) < 90 * 1000;
+    });
+  })();
 
   const handleCopyPath = async () => {
     const p = activeWs.path ?? "";
@@ -287,6 +335,19 @@ export function Sidebar({
     }
   };
 
+  // ── Plugin-contributed pages (v0.9.9) ─────────────────────────────
+  // Manifest `icon` is a lucide name resolved against a small curated
+  // map — importing the full lucide index would bloat the main chunk.
+  const PLUGIN_ICONS: Record<string, LucideIcon> = {
+    Puzzle, Sparkles, Wrench, FileText, BarChart3, Gamepad2, Calendar, ListTodo, StickyNote, Workflow,
+  };
+  const [pluginPages, setPluginPages] = useState<PluginPageItem[]>(() => getPluginPages());
+  useEffect(() => {
+    const onChange = () => setPluginPages(getPluginPages());
+    window.addEventListener("heravex:plugins-changed", onChange);
+    return () => window.removeEventListener("heravex:plugins-changed", onChange);
+  }, []);
+
   const sections: NavSection[] = [
     {
       eyebrow: t.navMainMenu ?? "MAIN MENU",
@@ -299,6 +360,7 @@ export function Sidebar({
         { key: "storehub", label: t.storeHub ?? "Store Hub", icon: Store },
         { key: "tasks", label: t.taskCenter, icon: ListTodo },
         { key: "notes", label: t.notebook ?? "Notes", icon: StickyNote },
+        { key: "flow", label: t.flowCenter ?? "Flow Center", icon: Workflow },
         { key: "calendar", label: t.calendar ?? "Calendar", icon: Calendar },
       ],
     },
@@ -310,6 +372,16 @@ export function Sidebar({
       ],
     },
   ];
+  if (pluginPages.length > 0) {
+    sections.push({
+      eyebrow: language === "tr" ? "EKLENTİLER" : "PLUGINS",
+      items: pluginPages.map((p) => ({
+        key: p.key as WorkspaceTab,
+        label: p.title,
+        icon: PLUGIN_ICONS[p.icon ?? ""] ?? Puzzle,
+      })),
+    });
+  }
 
   return (
     <aside className="sidebar modern-sidebar">
@@ -418,6 +490,45 @@ export function Sidebar({
                   {language === "tr" ? "Yolu kopyala" : language === "fr" ? "Copier le chemin" : language === "es" ? "Copiar ruta" : "Copy path"}
                 </button>
               </div>
+
+              {/* Online members strip — only when the active workspace is
+                  a team folder. Live presence comes from the team-sync
+                  heartbeat (30s lastSeenAt bump); a member is "online"
+                  when lastSeenAt is < 90s old. */}
+              {activeWs.mode === "team" && activeTeam && activeTeam.members.length > 0 && (
+                <div className="sidebar-ws-presence">
+                  <span className="sidebar-ws-presence-label">
+                    {language === "tr" ? "ŞU AN ÇEVRİMİÇİ" : language === "fr" ? "EN LIGNE" : language === "es" ? "EN LÍNEA" : "ONLINE NOW"}
+                    <span className="sidebar-ws-presence-count">
+                      {onlineMembers.length}/{activeTeam.members.length}
+                    </span>
+                  </span>
+                  <div className="sidebar-ws-presence-row">
+                    {activeTeam.members.slice(0, 6).map((m) => {
+                      const isOnline = onlineMembers.some((o) => o.userId === m.userId);
+                      return (
+                        <div
+                          key={m.userId}
+                          className={`sidebar-ws-presence-chip ${isOnline ? "is-online" : "is-offline"} role-${m.role}`}
+                          title={`${m.displayName}${m.role === "leader" ? " · Leader" : ""} · ${isOnline ? "online" : "offline"}`}
+                        >
+                          <div className="sidebar-ws-presence-avatar">
+                            {m.avatarPath
+                              ? <img src={imgSrc(m.avatarPath)} alt="" />
+                              : <span>{(m.displayName || "?").slice(0, 1).toUpperCase()}</span>}
+                            {m.role === "leader" && <span className="sidebar-ws-presence-crown">👑</span>}
+                          </div>
+                          <span className="sidebar-ws-presence-name">{m.displayName || "—"}</span>
+                          <span className={`sidebar-ws-presence-dot ${isOnline ? "is-on" : "is-off"}`} aria-hidden="true" />
+                        </div>
+                      );
+                    })}
+                    {activeTeam.members.length > 6 && (
+                      <span className="sidebar-ws-presence-more">+{activeTeam.members.length - 6}</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Local workspaces — includes the synthetic Default

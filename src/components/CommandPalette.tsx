@@ -3,6 +3,7 @@ import { Search, Command as CommandIcon, ArrowRight, ChevronRight, FileText, Lis
 import { useAppStore, type WorkspaceTab } from "../store";
 import { useEscape } from "../lib/keyboard";
 import { getAllNotes } from "../lib/storage";
+import { getPluginCommands, getPluginPages } from "../lib/plugins";
 import { invoke } from "../lib/invokeWrapper";
 import type { NoteRecord } from "../types";
 
@@ -113,6 +114,21 @@ export function CommandPalette({
       { id: "go-wallet",     label: tr("Go to Wallet",      "Cüzdan'a git"),            hint: tr("Expense tracker",            "Gider takibi"),            run: () => go("wallet") },
       { id: "go-analytics",  label: tr("Go to Analytics",   "Analitik'e git"),          hint: tr("Burn rate & reports",        "Yakım hızı & raporlar"),   run: () => go("analytics") },
       { id: "go-profile",    label: tr("Go to Profile",     "Profil'e git"),            hint: tr("Identity, prefs, API keys",  "Kimlik, tercihler, API"),  run: () => go("profile") },
+      // ── Plugin contributions (v0.9.9) — pages as "go to" actions,
+      //    commands run in place. The palette unmounts on close, so a
+      //    fresh open always reflects the current plugin set.
+      ...getPluginPages().map((p): PaletteAction => ({
+        id: `plugin-page-${p.key}`,
+        label: tr(`Go to ${p.title}`, `${p.title} sayfasına git`),
+        hint: p.pluginName,
+        run: () => go(p.key as WorkspaceTab),
+      })),
+      ...getPluginCommands().map((c): PaletteAction => ({
+        id: `plugin-cmd-${c.id}`,
+        label: c.label,
+        hint: tr("Plugin command", "Eklenti komutu"),
+        run: () => { onClose(); void c.run(); },
+      })),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [language]

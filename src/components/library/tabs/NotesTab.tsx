@@ -1,6 +1,5 @@
 ﻿import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../../../store";
-import { exportNotesPdf } from "../../../lib/storage";
 import { MarkdownWorkspace, type SaveStatus, type MarkdownTemplate } from "../../shared/MarkdownWorkspace";
 
 const GDD_TEMPLATE_TR = `# {{title}} — Game Design Document

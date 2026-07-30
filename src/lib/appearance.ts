@@ -60,6 +60,9 @@ export interface AppearanceSlice {
     | "midnight" | "ocean" | "plum" | "forest" | "slate" | "sunset";
   /** Whether the moving backdrop orbs render at all. */
   bgAnimation: boolean;
+  /** Flow Center canvas grid style + tint (Settings → Theme & Colors). */
+  flowBg?: "dots" | "lines" | "cross" | "plain";
+  flowBgColor?: string;
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSlice = {
@@ -75,6 +78,8 @@ export const DEFAULT_APPEARANCE: AppearanceSlice = {
   bgMain: "standard",
   bgSidebar: "dark",
   bgAnimation: true,
+  flowBg: "dots",
+  flowBgColor: "auto",
 };
 
 /** The eight preset accent swatches shown above the custom HEX field. */
@@ -215,6 +220,11 @@ export interface LayoutSlice {
   /** Show the framer-motion sliding pill behind the active sidebar
    *  item. When false the active state is a plain background swap. */
   sidebarSlideIndicator: boolean;
+
+  /** Flow Center: show the bottom-right minimap. */
+  flowMinimap?: boolean;
+  /** Flow Center: modifier key for add-to-selection (Shift default). */
+  flowMultiSelectKey?: "Shift" | "Control" | "Alt";
 }
 
 /** Canonical id list for Dashboard panels. Add new entries here AND
@@ -281,6 +291,7 @@ export const DEFAULT_LAYOUT: LayoutSlice = {
   dashboardHeroCard: "studioCard",
   transparentPanels: false,
   sidebarSlideIndicator: true,
+  flowMinimap: true,
 };
 
 const DENSITY_SCALE: Record<DensityMode, number> = {

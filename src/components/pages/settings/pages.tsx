@@ -24,7 +24,7 @@ import { SettingRow } from "./rows/SettingRow";
 import { Toggle, PillGroup, Dropdown, SliderRow, CompactButton, TextInput, TextArea, ChipInput, KeyComboButton, PasswordInput } from "./rows/controls";
 import { AccentSwatchGrid, ColorDot } from "./rows/swatches";
 import { ACCENT_PRESETS, DEFAULT_DASHBOARD_PANELS, type DashboardPanelEntry, type DashboardPanelId, type DashboardHeroCard, type LayoutSlice } from "../../../lib/appearance";
-import { detectCloudProvider } from "../../../lib/workspaces";
+import { detectCloudProvider, loadWorkspaces, addWorkspace, updateWorkspaceMode } from "../../../lib/workspaces";
 import { Reorder } from "framer-motion";
 import { GripVertical, RotateCcw } from "lucide-react";
 import {
@@ -55,6 +55,7 @@ import {
   type ShortcutAction, type ShortcutDef,
 } from "../../../lib/shortcutConfig";
 import { useCallback, useEffect, useState } from "react";
+import { PluginsPage } from "./PluginsPage";
 import type { SettingsSection } from "./sections";
 
 /** A throwaway "this control will be wired up later" chip. Sits in
@@ -84,6 +85,7 @@ export function SettingsPage({ section }: { section: SettingsSection }) {
     case "apiKeys":       return <ApiKeysPage />;
     case "teamMode":      return <TeamModePage />;
     case "webhooks":      return <WebhooksPage />;
+    case "plugins":       return <PluginsPage />;
     case "privacy":       return <PrivacyPage />;
     case "experimental":  return <ExperimentalPage />;
     case "about":         return <AboutPage />;
@@ -616,8 +618,9 @@ function ThemePreviewGrid({
 }
 
 function ThemePage() {
-  const { ui, appearance, setAppearance } = useAppStore();
+  const { ui, appearance, setAppearance, language } = useAppStore();
   const a = appearance;
+  const trc = (en: string, t: string) => (language === "tr" ? t : en);
   // Light mode lives behind a "v1.0" badge: the CSS class hook lands
   // in M2 but the light palette refactor itself is a future move. We
   // disable selecting it rather than silently swap to a half-styled
@@ -766,6 +769,57 @@ function ThemePage() {
             bgMain: mainId as typeof a.bgMain,
             bgSidebar: sidebarId as typeof a.bgSidebar,
           })}
+        />
+      </SettingGroup>
+
+      <SettingGroup label={trc("Flow Center canvas", "Flow Merkezi kanvası")}>
+        <SettingRow
+          title={trc("Grid style", "Izgara stili")}
+          control={
+            <Dropdown
+              value={a.flowBg ?? "dots"}
+              options={[
+                { id: "dots",  label: trc("Dots", "Noktalı") },
+                { id: "lines", label: trc("Lines", "Çizgili") },
+                { id: "cross", label: trc("Cross", "Artı") },
+                { id: "plain", label: trc("Plain", "Düz") },
+              ]}
+              onChange={(id) => setAppearance({ flowBg: id as "dots" | "lines" | "cross" | "plain" })}
+            />
+          }
+        />
+        <SettingRow
+          title={trc("Background follows theme", "Arka plan temayı izlesin")}
+          description={trc("Tints the canvas with your accent colour.", "Kanvası vurgu renginle tonlar.")}
+          control={
+            <Toggle
+              checked={(a.flowBgColor ?? "auto") === "auto"}
+              onChange={(v) => setAppearance({ flowBgColor: v ? "auto" : a.accentColor })}
+            />
+          }
+        />
+        <SettingRow
+          title={trc("Background color", "Arka plan rengi")}
+          control={
+            <AccentSwatchGrid
+              presets={[
+                { id: "blue",    value: "#4f8cff", label: "Blue" },
+                { id: "indigo",  value: "#6366f1", label: "Indigo" },
+                { id: "violet",  value: "#a855f7", label: "Violet" },
+                { id: "pink",    value: "#ec4899", label: "Pink" },
+                { id: "rose",    value: "#f87171", label: "Rose" },
+                { id: "sunset",  value: "#f59e0b", label: "Sunset" },
+                { id: "amber",   value: "#fbbf24", label: "Amber" },
+                { id: "forest",  value: "#22c55e", label: "Forest" },
+                { id: "emerald", value: "#10b981", label: "Emerald" },
+                { id: "ocean",   value: "#22d3ee", label: "Ocean" },
+                { id: "slate",   value: "#7d96c8", label: "Slate" },
+                { id: "gray",    value: "#64748b", label: "Gray" },
+              ]}
+              current={a.flowBgColor === "auto" ? "" : (a.flowBgColor ?? "")}
+              onChange={(next) => setAppearance({ flowBgColor: next })}
+            />
+          }
         />
       </SettingGroup>
 
@@ -1000,6 +1054,35 @@ function LayoutPage() {
             <Toggle
               checked={l.sidebarSlideIndicator !== false}
               onChange={(v) => setLayout({ sidebarSlideIndicator: v })}
+            />
+          }
+        />
+        <SettingRow
+          title={language === "tr" ? "Flow Merkezi mini haritası" : "Flow Center minimap"}
+          description={language === "tr"
+            ? "Flow tuvalinin sağ alt köşesindeki küçük haritayı göster."
+            : "Show the small map in the bottom-right of the flow canvas."}
+          control={
+            <Toggle
+              checked={l.flowMinimap !== false}
+              onChange={(v) => setLayout({ flowMinimap: v })}
+            />
+          }
+        />
+        <SettingRow
+          title={language === "tr" ? "Flow çoklu-seçim tuşu" : "Flow multi-select key"}
+          description={language === "tr"
+            ? "Birden fazla node'u tek tek seçmek için basılı tutulan tuş."
+            : "Held to add nodes to the selection one by one."}
+          control={
+            <Dropdown
+              value={l.flowMultiSelectKey ?? "Shift"}
+              options={[
+                { id: "Shift",   label: "Shift" },
+                { id: "Control", label: "Ctrl" },
+                { id: "Alt",     label: "Alt" },
+              ]}
+              onChange={(id) => setLayout({ flowMultiSelectKey: id as "Shift" | "Control" | "Alt" })}
             />
           }
         />
@@ -2299,6 +2382,17 @@ function TeamModePage() {
           }
         }
         await setWorkspacePath(dir);
+        // CRITICAL: register the folder as a TEAM workspace so the
+        // team-sync poller (`isTeamWorkspaceActive`) reliably activates.
+        // Without this, sync only ran when the path heuristically looked
+        // like a cloud folder — so "enable team mode" silently did
+        // nothing for many real folders. (Root cause of "no propagation".)
+        const existing = loadWorkspaces().find((w) => w.path === dir);
+        if (existing && existing.id !== "default") {
+          updateWorkspaceMode(existing.id, "team", provider ?? "other");
+        } else {
+          addWorkspace(dir.split(/[\\/]/).pop() || "Team", dir, { mode: "team", cloudProvider: provider ?? "other" });
+        }
         setWorkspacePathState(dir);
         await refreshGames();
         showToast(ui.teamModeWorkspaceSet, "success");
@@ -2366,39 +2460,14 @@ function TeamModePage() {
       </SettingGroup>
 
       <SettingGroup label={ui.teamModeGroupConflict}>
+        {/* v0.9.8 — sync is now fully automatic: instant polling +
+            per-file merge (different files never conflict), so the
+            watcher-delay and conflict-strategy knobs were removed. */}
         <SettingRow
-          title={ui.teamModeConflictStrategy}
-          control={
-            <Dropdown
-              value={teamMode.conflictStrategy}
-              options={[
-                { id: "lastWriterWins", label: ui.teamModeConflictLast },
-                { id: "manualMerge",    label: ui.teamModeConflictManual },
-                { id: "autoMerge",      label: ui.teamModeConflictAuto },
-              ]}
-              onChange={(id) => setTeamMode({ conflictStrategy: id as typeof teamMode.conflictStrategy })}
-            />
-          }
-        />
-        <SettingRow
-          title={ui.teamModeWatcherDelay}
-          description={ui.teamModeWatcherDelayDesc}
-          control={
-            <PillGroup
-              value={teamMode.watcherDelay}
-              options={[
-                { id: "instant", label: ui.teamModeDelayInstant },
-                { id: "5s",      label: "5s" },
-                { id: "30s",     label: "30s" },
-                { id: "2m",      label: "2m" },
-              ]}
-              onChange={(id) => setTeamMode({ watcherDelay: id as typeof teamMode.watcherDelay })}
-            />
-          }
-        />
-        <SettingRow
-          title={ui.teamModeShowLogs}
-          control={<Toggle checked={teamMode.showWatcherLogs} onChange={(v) => setTeamMode({ showWatcherLogs: v })} />}
+          title={language === "tr" ? "Otomatik eşitleme" : "Automatic sync"}
+          description={language === "tr"
+            ? "Değişiklikler anında eşitlenir ve dosya bazında otomatik birleşir — ayar gerekmez."
+            : "Changes sync instantly and merge per-file automatically — nothing to configure."}
         />
         <SyncStatusRow />
         <SettingRow
@@ -2432,6 +2501,22 @@ function TeamModePage() {
  *  Local / non-team workspaces show a hint that switching to a team
  *  folder is required — the same flow as picking a workspace above.
  */
+/** Member avatar that degrades to initials. Avatar paths are absolute on
+ *  the writer's machine, so a teammate's path won't resolve on yours —
+ *  `onError` falls back to the initial rather than showing a broken image
+ *  (this is why the leader looked "profile-less"). */
+function TeamMemberAvatar({ avatarPath, displayName, role }: { avatarPath?: string | null; displayName: string; role: string }) {
+  const [failed, setFailed] = useState(false);
+  const initial = (displayName || "?").slice(0, 1).toUpperCase();
+  return (
+    <div className={`team-member-avatar role-${role}`} aria-hidden="true">
+      {avatarPath && !failed
+        ? <img src={imgSrc(avatarPath) ?? undefined} alt="" onError={() => setFailed(true)} />
+        : <span>{initial}</span>}
+    </div>
+  );
+}
+
 function TeamMembersPanel({ workspacePath, language }: { workspacePath: string; language: string }) {
   const [doc, setDoc] = useState<import("../../../lib/teamMembers").MembersDoc | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2451,8 +2536,16 @@ function TeamMembersPanel({ workspacePath, language }: { workspacePath: string; 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
     const onChange = () => void refresh();
+    // Self heartbeat fires `team-members-changed`; remote teammate
+    // changes fire `members-file-changed` (from the manifest poll). Both
+    // must refresh the panel — listening only to the former was why
+    // teammates' rows never appeared without a manual reload.
     window.addEventListener("heravex:team-members-changed", onChange);
-    return () => window.removeEventListener("heravex:team-members-changed", onChange);
+    window.addEventListener("heravex:members-file-changed", onChange);
+    return () => {
+      window.removeEventListener("heravex:team-members-changed", onChange);
+      window.removeEventListener("heravex:members-file-changed", onChange);
+    };
   }, [refresh]);
 
   const pick = (en: string, tr: string, fr: string, es: string) =>
@@ -2541,11 +2634,7 @@ function TeamMembersPanel({ workspacePath, language }: { workspacePath: string; 
           const isMe = m.userId === meId;
           return (
             <li key={m.userId} className={`team-member-row team-member-role-${m.role} ${isMe ? "is-me" : ""}`}>
-              <div className={`team-member-avatar role-${m.role}`} aria-hidden="true">
-                {m.avatarPath
-                  ? <img src={imgSrc(m.avatarPath)} alt="" />
-                  : <span>{(m.displayName || "?").slice(0, 1).toUpperCase()}</span>}
-              </div>
+              <TeamMemberAvatar avatarPath={m.avatarPath} displayName={m.displayName} role={m.role} />
               <div className="team-member-body">
                 <strong className="team-member-name">
                   {m.displayName || pick("Anonymous", "İsimsiz", "Anonyme", "Anónimo")}

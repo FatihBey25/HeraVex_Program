@@ -15,7 +15,7 @@ import {
   Palette, Type, LayoutGrid,
   Settings as SettingsIcon, AppWindow, Keyboard, Clock,
   Database, ShieldCheck, ArrowLeftRight,
-  KeyRound, Cloud, Webhook,
+  KeyRound, Cloud, Webhook, Puzzle,
   ShieldAlert, FlaskConical, Info,
   type LucideIcon,
 } from "lucide-react";
@@ -31,7 +31,7 @@ export type SettingsSection =
   // VERİ
   | "storage" | "backup" | "importExport"
   // BAĞLANTILAR
-  | "apiKeys" | "teamMode" | "webhooks"
+  | "apiKeys" | "teamMode" | "webhooks" | "plugins"
   // SİSTEM
   | "privacy" | "experimental" | "about";
 
@@ -102,6 +102,7 @@ export const SETTINGS_ITEMS: SidebarItem[] = [
   { id: "apiKeys",       group: "connections", icon: KeyRound,    labelKey: "settingsNavApiKeys",       subtitleKey: "settingsSubtitleApiKeys" },
   { id: "teamMode",      group: "connections", icon: Cloud,       labelKey: "settingsNavTeamMode",      subtitleKey: "settingsSubtitleTeamMode" },
   { id: "webhooks",      group: "connections", icon: Webhook,     labelKey: "settingsNavWebhooks",      subtitleKey: "settingsSubtitleWebhooks" },
+  { id: "plugins",       group: "connections", icon: Puzzle,      labelKey: "settingsNavPlugins",       subtitleKey: "settingsSubtitlePlugins" },
   // SİSTEM
   { id: "privacy",       group: "system",      icon: ShieldAlert, labelKey: "settingsNavPrivacy",       subtitleKey: "settingsSubtitlePrivacy" },
   { id: "experimental",  group: "system",      icon: FlaskConical, labelKey: "settingsNavExperimental", subtitleKey: "settingsSubtitleExperimental" },

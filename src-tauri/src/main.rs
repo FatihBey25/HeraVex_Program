@@ -600,6 +600,28 @@ struct NoteRecord {
     order: i32,
 }
 
+/// Flow Center document (v0.9.8). One graph per file under
+/// `workspace/flows/{id}.json`, the atomic unit for save / .bak /
+/// team-sync — exactly like a note or game.
+///
+/// Rust treats the graph body (nodes, edges, viewport, …) as an opaque
+/// passthrough: only `id` (filename + identity), `name`, and
+/// `updated_at` (server stamp) are read here. Everything else is
+/// captured by `#[serde(flatten)]` and round-tripped untouched, so the
+/// frontend owns the schema and Rust never drops a field it doesn't
+/// know about.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Flow {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
+}
+
 // ═══ Atomic per-id storage ═══════════════════════════════════════════════
 //
 // Each game lives in workspace/games/{id}.json and each note in
@@ -619,6 +641,12 @@ fn notes_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn flows_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = data_root(app)?.join("flows");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
 fn safe_id_filename(id: &str) -> String {
     let cleaned: String = id
         .chars()
@@ -631,14 +659,28 @@ fn safe_id_filename(id: &str) -> String {
     }
 }
 
+/// Snapshot the file at `path` into a sibling `.bak` BEFORE writing
+/// the new payload. Closes the corruption window in the v0.9.7
+/// review: if a power cut or disk-full event truncates the live
+/// file, the loader can fall back to `.bak` and survive. Single-deep
+/// backup ring — the previous `.bak` is overwritten on every save,
+/// keeping disk overhead bounded.
+fn snapshot_before_write(path: &PathBuf) {
+    if !path.exists() { return; }
+    let bak = path.with_extension("json.bak");
+    let _ = fs::copy(path, &bak);
+}
+
 fn save_single_game_to_disk(app: &AppHandle, game: &GameRecord) -> Result<(), String> {
     let path = games_dir(app)?.join(format!("{}.json", safe_id_filename(&game.id)));
+    snapshot_before_write(&path);
     let payload = serde_json::to_string_pretty(game).map_err(|e| e.to_string())?;
     atomic_write(&path, payload.as_bytes())
 }
 
 fn save_single_note_to_disk(app: &AppHandle, note: &NoteRecord) -> Result<(), String> {
     let path = notes_dir(app)?.join(format!("{}.json", safe_id_filename(&note.id)));
+    snapshot_before_write(&path);
     let payload = serde_json::to_string_pretty(note).map_err(|e| e.to_string())?;
     atomic_write(&path, payload.as_bytes())
 }
@@ -710,7 +752,41 @@ fn load_games_from_disk(app: &AppHandle) -> Result<Vec<GameRecord>, String> {
                         }
                         games.push(game);
                     }
-                    Err(e) => println!("[load_games] skip {}: {e}", path.display()),
+                    Err(parse_err) => {
+                        // v0.9.7 resilience pass — corruption recovery.
+                        // The live file is half-written (power cut /
+                        // disk full / cloud sync truncation). Don't
+                        // silently drop the game: rename the bad copy
+                        // to `.corrupt` so it isn't re-overwritten on
+                        // the next save, then try `.bak` (snapshot
+                        // taken before every write).
+                        let corrupt = path.with_extension("json.corrupt");
+                        let _ = fs::rename(&path, &corrupt);
+                        let bak = path.with_extension("json.bak");
+                        if bak.exists() {
+                            if let Ok(bak_raw) = fs::read_to_string(&bak) {
+                                if let Ok(game) = serde_json::from_str::<GameRecord>(&bak_raw) {
+                                    let _ = fs::copy(&bak, &path);
+                                    println!(
+                                        "[load_games] RECOVERY from .bak for {} — parse err was: {parse_err}",
+                                        path.display()
+                                    );
+                                    games.push(game);
+                                    continue;
+                                }
+                            }
+                        }
+                        // No usable backup. Log loudly so the user can
+                        // investigate the `.corrupt` file by hand. The
+                        // load continues with whatever remains so a
+                        // single bad file doesn't take the whole
+                        // workspace down.
+                        eprintln!(
+                            "[load_games] CORRUPT (no usable .bak): {} → {} ; original error: {parse_err}",
+                            path.display(),
+                            corrupt.display()
+                        );
+                    }
                 }
             }
             Err(e) => println!("[load_games] read err {}: {e}", path.display()),
@@ -754,9 +830,38 @@ fn load_notes_from_disk(app: &AppHandle) -> Result<Vec<NoteRecord>, String> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-        if let Ok(raw) = fs::read_to_string(&path) {
-            if let Ok(n) = serde_json::from_str::<NoteRecord>(&raw) {
-                notes.push(n);
+        let raw = match fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        match serde_json::from_str::<NoteRecord>(&raw) {
+            Ok(n) => notes.push(n),
+            Err(parse_err) => {
+                // v0.9.7 resilience pass — same recovery flow as
+                // load_games_from_disk. Bad live file → .corrupt;
+                // try .bak; if neither works, log + skip rather
+                // than silently dropping the note from the list.
+                let corrupt = path.with_extension("json.corrupt");
+                let _ = fs::rename(&path, &corrupt);
+                let bak = path.with_extension("json.bak");
+                if bak.exists() {
+                    if let Ok(bak_raw) = fs::read_to_string(&bak) {
+                        if let Ok(n) = serde_json::from_str::<NoteRecord>(&bak_raw) {
+                            let _ = fs::copy(&bak, &path);
+                            println!(
+                                "[load_notes] RECOVERY from .bak for {} — parse err was: {parse_err}",
+                                path.display()
+                            );
+                            notes.push(n);
+                            continue;
+                        }
+                    }
+                }
+                eprintln!(
+                    "[load_notes] CORRUPT (no usable .bak): {} → {} ; original error: {parse_err}",
+                    path.display(),
+                    corrupt.display()
+                );
             }
         }
     }
@@ -875,10 +980,68 @@ fn save_settings_to_disk(app: &AppHandle, settings: &AppSettings) -> Result<(), 
     atomic_write(&path, payload.as_bytes())
 }
 
+/// Process-wide counter for unique `.tmp` suffixes — combined with
+/// the PID it guarantees that two concurrent `atomic_write` calls
+/// (different threads OR different Tauri instances pointed at the
+/// same workspace folder) don't collide on the temp file. The old
+/// version always used `path.tmp` which let one writer's rename
+/// pick up the other writer's half-flushed data.
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn atomic_write(path: &PathBuf, data: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, data).map_err(|err| err.to_string())?;
-    fs::rename(&tmp, path).map_err(|err| err.to_string())
+    let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("hv"),
+        pid,
+        n,
+    ));
+    // v0.9.7 resilience pass — jittered retry for cloud-sync lock
+    // windows. OneDrive / Dropbox briefly grab exclusive handles on
+    // every save (typical 200–500ms). Without retry the first attempt
+    // hits `ERROR_SHARING_VIOLATION` (kind: PermissionDenied) on
+    // Windows or EBUSY on macOS, surfaces as "save failed" toast, and
+    // the user loses the in-memory diff. Three attempts with 100ms /
+    // 200ms / 400ms base + small per-call jitter so two clients in
+    // the same workspace don't beat-frequency collide.
+    let max_attempts = 3u32;
+    for attempt in 0..max_attempts {
+        let write_res = fs::write(&tmp, data);
+        match write_res {
+            Ok(_) => {}
+            Err(e) if attempt + 1 < max_attempts
+                && matches!(e.kind(), std::io::ErrorKind::PermissionDenied
+                                    | std::io::ErrorKind::WouldBlock) =>
+            {
+                let base_ms = 100u64 * (1u64 << attempt);
+                let jitter = (pid as u64 ^ n) % 50;
+                std::thread::sleep(std::time::Duration::from_millis(base_ms + jitter));
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        // Best-effort cleanup: if rename fails partway through, leave
+        // the tmp on disk for inspection rather than leaking silently.
+        match fs::rename(&tmp, path) {
+            Ok(_) => return Ok(()),
+            Err(e) if attempt + 1 < max_attempts
+                && matches!(e.kind(), std::io::ErrorKind::PermissionDenied
+                                    | std::io::ErrorKind::WouldBlock) =>
+            {
+                let base_ms = 100u64 * (1u64 << attempt);
+                let jitter = (pid as u64 ^ n) % 50;
+                std::thread::sleep(std::time::Duration::from_millis(base_ms + jitter));
+                continue;
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(e.to_string());
+            }
+        }
+    }
+    let _ = fs::remove_file(&tmp);
+    Err("atomic_write: maksimum deneme sayisina ulasildi (dosya kilitli olabilir)".into())
 }
 
 fn slugify(value: &str) -> String {
@@ -1030,8 +1193,28 @@ fn create_game(app: AppHandle, input: CreateGameInput) -> Result<GameRecord, Str
     Ok(game)
 }
 
+/// Per-process write lock for `save_game` / `save_notes` /
+/// `save_global_expenses` / `save_settings` etc.
+///
+/// Closes the TOCTOU window from v0.9.7 review: two requests entering
+/// `save_game` simultaneously both called `load_games_from_disk`
+/// (seeing the same state), then both serialised their copy back —
+/// last writer silently lost the other's diff. Per-process Mutex
+/// serialises the load → modify → write sequence so each transaction
+/// is atomic from the in-process perspective.
+///
+/// Cross-process atomicity (two Tauri instances against the same
+/// cloud folder) still relies on the cloud client's last-writer-wins
+/// merge. A future hardened version would optimistic-CAS against
+/// games.json's mtime; the granular team-sync orchestrator already
+/// limits the blast radius because conflicting writes touch separate
+/// files for separate concerns (notes vs games vs members).
+static WORKSPACE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tauri::command]
 fn save_game(app: AppHandle, mut game: GameRecord) -> Result<GameRecord, String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut games = load_games_from_disk(&app)?;
     game.updated_at = now_iso();
 
@@ -1229,6 +1412,8 @@ fn set_preferred_language(app: AppHandle, language: String) -> Result<(), String
 
 #[tauri::command]
 fn save_global_expenses(app: AppHandle, expenses: Vec<ExpenseItem>) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut settings = load_settings_from_disk(&app)?;
     settings.global_expenses = expenses;
     save_settings_to_disk(&app, &settings)
@@ -1236,6 +1421,8 @@ fn save_global_expenses(app: AppHandle, expenses: Vec<ExpenseItem>) -> Result<()
 
 #[tauri::command]
 fn save_exchange_rates(app: AppHandle, rates: std::collections::HashMap<String, f64>) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut settings = load_settings_from_disk(&app)?;
     settings.exchange_rates = Some(rates);
     save_settings_to_disk(&app, &settings)
@@ -1267,19 +1454,172 @@ fn team_read_members(workspace_path: String) -> Result<String, String> {
     }
 }
 
+/// Members file metadata returned alongside the content so the
+/// frontend can do optimistic CAS: read mtime + bytes, modify,
+/// attempt write with `expected_mtime`. The Rust side rejects the
+/// write if the file changed in between — the caller re-reads and
+/// retries. Solves the leader race the review flagged: two clients
+/// that both saw an empty members list and both wrote themselves
+/// as leader; the second writer now gets a conflict error and
+/// re-reads to find the first writer already there, accepting
+/// member role instead.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MembersReadResult {
+    content: String,
+    mtime: u64,
+}
+
+#[tauri::command]
+fn team_read_members_versioned(workspace_path: String) -> Result<MembersReadResult, String> {
+    let path = std::path::PathBuf::from(&workspace_path).join("heravex-members.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mtime = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let content = String::from_utf8(bytes)
+                .map_err(|e| format!("members.json UTF-8 değil: {e}"))?;
+            Ok(MembersReadResult { content, mtime })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MembersReadResult { content: "{}".into(), mtime: 0 }),
+        Err(e) => Err(format!("members.json okunamadi: {e}")),
+    }
+}
+
 #[tauri::command]
 fn team_write_members(workspace_path: String, content: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = std::path::PathBuf::from(&workspace_path);
     if !dir.is_dir() {
         return Err(format!("workspace klasoru yok: {workspace_path}"));
     }
     let target = dir.join("heravex-members.json");
-    let tmp = dir.join("heravex-members.json.tmp");
-    std::fs::write(&tmp, content.as_bytes())
-        .map_err(|e| format!("members.json gecici dosya yazilamadi: {e}"))?;
-    std::fs::rename(&tmp, &target)
-        .map_err(|e| format!("members.json atomik degistirilemedi: {e}"))?;
+    // Use the shared atomic_write so the unique-tmp guarantee covers
+    // members.json too (two cloud-synced instances writing at the
+    // same instant won't clobber a shared .tmp file).
+    atomic_write(&target, content.as_bytes())
+        .map_err(|e| format!("members.json yazilamadi: {e}"))
+}
+
+/// Compare-And-Swap write: only succeeds if the current mtime
+/// matches `expected_mtime`. Returns Err with a specific marker
+/// string the frontend can detect and retry.
+#[tauri::command]
+fn team_write_members_cas(workspace_path: String, content: String, expected_mtime: u64) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let dir = std::path::PathBuf::from(&workspace_path);
+    if !dir.is_dir() {
+        return Err(format!("workspace klasoru yok: {workspace_path}"));
+    }
+    let target = dir.join("heravex-members.json");
+    // Verify the on-disk mtime matches the caller's expectation
+    // BEFORE writing. If the file has been touched by another client
+    // since the caller's read, the caller's planned modification is
+    // based on stale state and must retry.
+    let actual_mtime = std::fs::metadata(&target)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if actual_mtime != expected_mtime {
+        return Err(format!("CAS_CONFLICT:{actual_mtime}"));
+    }
+    atomic_write(&target, content.as_bytes())
+        .map_err(|e| format!("members.json yazilamadi: {e}"))
+}
+
+// ── Per-user team presence (v0.9.8 rewrite) ──────────────────────────────────
+//
+// The old model had every client read-modify-write a single shared
+// `heravex-members.json`. Over a cloud-sync folder that races: two
+// machines edit their local copy, the cloud merges last-writer-wins,
+// and member rows get silently dropped (you'd only ever see the leader).
+//
+// The fix is presence-per-user: each client writes ONLY its own file at
+// `heravex-members/<userId>.json` and never touches anyone else's, so
+// the cloud never has to merge a shared document. The members list is
+// the UNION of every file in that directory. Role overrides
+// (ban / explicit leader) live in a single `_roles.json` written ONLY by
+// the leader — again a one-writer file, so no race.
+
+fn team_members_dir(workspace_path: &str) -> Result<PathBuf, String> {
+    let dir = PathBuf::from(workspace_path).join("heravex-members");
+    fs::create_dir_all(&dir).map_err(|e| format!("members dizini olusturulamadi: {e}"))?;
+    Ok(dir)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamReadResult {
+    /// Raw JSON contents of every per-user presence file.
+    members: Vec<String>,
+    /// Raw JSON of `_roles.json`, or null when the leader has never set roles.
+    roles: Option<String>,
+}
+
+/// Write the caller's OWN presence file. Atomic; never touches others'.
+#[tauri::command]
+fn team_write_self(workspace_path: String, user_id: String, content: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let dir = team_members_dir(&workspace_path)?;
+    let target = dir.join(format!("{}.json", safe_id_filename(&user_id)));
+    atomic_write(&target, content.as_bytes())
+        .map_err(|e| format!("presence yazilamadi: {e}"))
+}
+
+/// Leader-only: write the shared role-overrides file (single writer).
+#[tauri::command]
+fn team_write_roles(workspace_path: String, content: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let dir = team_members_dir(&workspace_path)?;
+    let target = dir.join("_roles.json");
+    atomic_write(&target, content.as_bytes())
+        .map_err(|e| format!("roles yazilamadi: {e}"))
+}
+
+/// Leader-only: remove a member's presence file (kick). If that member
+/// is still active their next heartbeat re-creates it — banning via the
+/// roles file is the permanent option.
+#[tauri::command]
+fn team_remove_member_file(workspace_path: String, user_id: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let dir = team_members_dir(&workspace_path)?;
+    let target = dir.join(format!("{}.json", safe_id_filename(&user_id)));
+    if target.exists() { let _ = fs::remove_file(&target); }
     Ok(())
+}
+
+/// Read the whole team: every presence file + the roles file. Tolerant —
+/// a half-written file (cloud mid-sync) is skipped, not fatal.
+#[tauri::command]
+fn team_read_team(workspace_path: String) -> Result<TeamReadResult, String> {
+    let dir = PathBuf::from(&workspace_path).join("heravex-members");
+    if !dir.is_dir() {
+        return Ok(TeamReadResult { members: Vec::new(), roles: None });
+    }
+    let mut members = Vec::new();
+    let mut roles = None;
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let content = match fs::read_to_string(&path) { Ok(c) => c, Err(_) => continue };
+            if name == "_roles.json" {
+                roles = Some(content);
+            } else {
+                members.push(content);
+            }
+        }
+    }
+    Ok(TeamReadResult { members, roles })
 }
 
 // ── Global notes search (v0.9.7 Tur 3b) ─────────────────────────────────────
@@ -1370,8 +1710,10 @@ fn build_snippet(body: &str, query_l: &str, max_len: usize) -> String {
     snippet
 }
 
-#[tauri::command]
-fn search_notes(app: AppHandle, query: String, limit: Option<usize>) -> Result<Vec<SearchHit>, String> {
+/// Synchronous worker — the heavy disk + parse + scoring loop. Kept
+/// non-`tauri::command` so the async wrapper below can hand it to
+/// `spawn_blocking` and free the IPC thread pool while the work runs.
+fn search_notes_blocking(app: &AppHandle, query: String, limit: Option<usize>) -> Result<Vec<SearchHit>, String> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -1381,7 +1723,7 @@ fn search_notes(app: AppHandle, query: String, limit: Option<usize>) -> Result<V
     let mut hits: Vec<SearchHit> = Vec::new();
 
     // Global notes
-    let global = load_notes_from_disk(&app).unwrap_or_default();
+    let global = load_notes_from_disk(app).unwrap_or_default();
     for n in global.into_iter() {
         let body = strip_html(&n.content);
         let title_l = n.title.to_lowercase();
@@ -1401,7 +1743,7 @@ fn search_notes(app: AppHandle, query: String, limit: Option<usize>) -> Result<V
 
     // Per-game notes (the legacy `game.notes` blob — one note per
     // game, used as the GDD)
-    let games = load_games_from_disk(&app).unwrap_or_default();
+    let games = load_games_from_disk(app).unwrap_or_default();
     for g in games.into_iter() {
         let body = strip_html(&g.notes);
         if body.trim().is_empty() { continue; }
@@ -1423,6 +1765,18 @@ fn search_notes(app: AppHandle, query: String, limit: Option<usize>) -> Result<V
     hits.sort_by(|a, b| b.score.cmp(&a.score));
     hits.truncate(cap);
     Ok(hits)
+}
+
+/// v0.9.7 resilience pass — async wrapper so a slow disk read (cloud
+/// folder, big notes file) doesn't pin the Tauri IPC pool. Without
+/// this every keystroke in CommandPalette could hold the IPC thread
+/// for the duration of the disk scan, queueing every other invoke
+/// behind it.
+#[tauri::command]
+async fn search_notes(app: AppHandle, query: String, limit: Option<usize>) -> Result<Vec<SearchHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || search_notes_blocking(&app, query, limit))
+        .await
+        .map_err(|e| format!("search join failed: {e}"))?
 }
 
 /// Fetch live FX rates from the internet, tried in order so a single
@@ -1505,6 +1859,8 @@ fn save_currency_labels(app: AppHandle, label1: String, label2: String) -> Resul
 
 #[tauri::command]
 fn delete_game(app: AppHandle, game_id: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut games = load_games_from_disk(&app)?;
     let removed_title = games
         .iter()
@@ -2146,6 +2502,35 @@ fn pick_google_play_json() -> Result<String, String> {
     Ok(picked.to_string_lossy().to_string())
 }
 
+/// v0.9.8 — Local asset reference picker for the notes editor.
+///
+/// Returns the **absolute path** of an image/audio file the user picks.
+/// Crucially it does NOT copy the file anywhere: the renderer feeds this
+/// path through `convertFileSrc` so the WebView streams the bytes
+/// straight off the user's disk via the `asset:` protocol. This keeps a
+/// 200 MB reference image out of the (cloud-synced) workspace folder —
+/// the note only stores the path string.
+///
+/// The trade-off the caller must own: the reference breaks if the user
+/// moves/renames the source file. That's an acceptable, well-understood
+/// contract for a local-first tool (same as a Markdown `![](C:/…)` link).
+#[tauri::command]
+fn pick_asset_file() -> Result<String, String> {
+    let picked = FileDialog::new()
+        .set_title("Görsel veya ses dosyası seç")
+        .add_filter(
+            "Medya",
+            &[
+                "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg",
+                "wav", "mp3", "ogg", "flac", "m4a", "aac",
+            ],
+        )
+        .add_filter("Tüm dosyalar", &["*"])
+        .pick_file()
+        .ok_or_else(|| "Dosya seçimi iptal edildi.".to_string())?;
+    Ok(picked.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn save_store_mapping(
     app: AppHandle,
@@ -2210,9 +2595,17 @@ fn unlink_store_mapping(
 }
 
 fn build_http_client() -> Result<reqwest::Client, String> {
+    // v0.9.7 resilience pass — separate connect_timeout from the
+    // overall request timeout. The previous `.timeout(15s)` only
+    // covers "first byte received"; a DNS hang or unanswered SYN on
+    // Windows can sit for the full TCP retry budget (~2 min) before
+    // surfacing. `connect_timeout(8s)` makes "no network" feel like
+    // 8 seconds instead of 2 minutes; overall `.timeout(20s)` then
+    // bounds the slowest reasonable cold provider response.
     reqwest::Client::builder()
         .user_agent("HeraVex/0.1")
-        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP istemci hatasi: {e}"))
 }
@@ -2332,8 +2725,65 @@ async fn fetch_store_games(
     }
 }
 
+/// Stale-cache wrapper around the live HTTP path. Closes the
+/// resilience review's #4: offline / API down → infinite spinner →
+/// crash. After every successful live fetch we drop the result into
+/// `<data_root>/cache/store_<provider>_<id>.json`. On the next call,
+/// if the live fetch fails for any reason, we return the cached
+/// copy with no further error so the UI keeps rendering the last
+/// known good numbers. The cache file is best-effort — disk failures
+/// don't propagate.
 #[tauri::command]
 async fn fetch_store_data(
+    app: AppHandle,
+    provider: String,
+    external_id: String,
+) -> Result<StoreData, String> {
+    let id = external_id.trim().to_string();
+    if id.is_empty() {
+        return Err("Magaza ID bos.".into());
+    }
+    let cache_path = (|| -> Option<PathBuf> {
+        let root = data_root(&app).ok()?;
+        Some(root.join("cache").join(format!(
+            "store_{}_{}.json",
+            provider, safe_id_filename(&id),
+        )))
+    })();
+
+    match fetch_store_data_live(app.clone(), provider.clone(), id.clone()).await {
+        Ok(data) => {
+            if let Some(path) = cache_path.as_ref() {
+                if let Some(parent) = path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Ok(json) = serde_json::to_string(&data) {
+                    let _ = atomic_write(path, json.as_bytes());
+                }
+            }
+            Ok(data)
+        }
+        Err(live_err) => {
+            // Live failed — try the stale cache so the UI doesn't
+            // blank out a panel just because Steam is having a bad
+            // afternoon. We log the original error so the user can
+            // tell from the dev console why they're seeing stale.
+            if let Some(path) = cache_path.as_ref() {
+                if let Ok(raw) = fs::read_to_string(path) {
+                    if let Ok(cached) = serde_json::from_str::<StoreData>(&raw) {
+                        eprintln!(
+                            "[fetch_store_data] live failed for {provider}/{id} ({live_err}); served cached copy"
+                        );
+                        return Ok(cached);
+                    }
+                }
+            }
+            Err(live_err)
+        }
+    }
+}
+
+async fn fetch_store_data_live(
     app: AppHandle,
     provider: String,
     external_id: String,
@@ -2950,8 +3400,22 @@ fn get_all_notes(app: AppHandle) -> Result<Vec<NoteRecord>, String> {
     Ok(notes)
 }
 
+/// Read ONE note straight off disk (cheap single-file read) — used by the
+/// team-mode 3-way merge to compare the current on-disk version against
+/// the base the editor started from. Returns None when the file is
+/// absent or unparseable.
+#[tauri::command]
+fn read_note(app: AppHandle, note_id: String) -> Result<Option<NoteRecord>, String> {
+    let path = notes_dir(&app)?.join(format!("{}.json", safe_id_filename(&note_id)));
+    if !path.exists() { return Ok(None); }
+    let raw = match fs::read_to_string(&path) { Ok(r) => r, Err(_) => return Ok(None) };
+    Ok(serde_json::from_str::<NoteRecord>(&raw).ok())
+}
+
 #[tauri::command]
 fn save_note(app: AppHandle, mut note: NoteRecord) -> Result<NoteRecord, String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let is_new = note.id.trim().is_empty();
     if note.title.trim().is_empty() {
         note.title = "Yeni Not".into();
@@ -2971,11 +3435,109 @@ fn save_note(app: AppHandle, mut note: NoteRecord) -> Result<NoteRecord, String>
 
 #[tauri::command]
 fn delete_note(app: AppHandle, note_id: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut notes = load_notes_from_disk(&app)?;
     let removed_title = notes.iter().find(|n| n.id == note_id).map(|n| n.title.clone());
     notes.retain(|n| n.id != note_id);
     save_notes_to_disk(&app, &notes)?;
     append_activity(&app, "note.deleted", removed_title);
+    Ok(())
+}
+
+// ── Flow Center storage (v0.9.8) ────────────────────────────────────────────
+//
+// Same atomic-per-id contract as notes: snapshot `.bak` before every
+// write, `atomic_write` (tmp+rename, cloud-lock retry), and `.bak`
+// recovery on a corrupt load. Flows therefore inherit the full v0.9.7
+// resilience guarantees rather than being second-class.
+
+fn save_single_flow_to_disk(app: &AppHandle, flow: &Flow) -> Result<(), String> {
+    let path = flows_dir(app)?.join(format!("{}.json", safe_id_filename(&flow.id)));
+    snapshot_before_write(&path);
+    let payload = serde_json::to_string_pretty(flow).map_err(|e| e.to_string())?;
+    atomic_write(&path, payload.as_bytes())
+}
+
+fn load_flows_from_disk(app: &AppHandle) -> Result<Vec<Flow>, String> {
+    let dir = flows_dir(app)?;
+    let mut flows: Vec<Flow> = Vec::new();
+    let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+        let raw = match fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        match serde_json::from_str::<Flow>(&raw) {
+            Ok(f) => flows.push(f),
+            Err(parse_err) => {
+                // Mirror the notes/games recovery flow: quarantine the
+                // bad live file, then try the `.bak` snapshot.
+                let corrupt = path.with_extension("json.corrupt");
+                let _ = fs::rename(&path, &corrupt);
+                let bak = path.with_extension("json.bak");
+                if bak.exists() {
+                    if let Ok(bak_raw) = fs::read_to_string(&bak) {
+                        if let Ok(f) = serde_json::from_str::<Flow>(&bak_raw) {
+                            let _ = fs::copy(&bak, &path);
+                            println!(
+                                "[load_flows] RECOVERY from .bak for {} — parse err was: {parse_err}",
+                                path.display()
+                            );
+                            flows.push(f);
+                            continue;
+                        }
+                    }
+                }
+                eprintln!(
+                    "[load_flows] CORRUPT (no usable .bak): {} → {} ; original error: {parse_err}",
+                    path.display(),
+                    corrupt.display()
+                );
+            }
+        }
+    }
+    flows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(flows)
+}
+
+#[tauri::command]
+fn load_flows(app: AppHandle) -> Result<Vec<Flow>, String> {
+    load_flows_from_disk(&app)
+}
+
+#[tauri::command]
+fn save_flow(app: AppHandle, mut flow: Flow) -> Result<Flow, String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let is_new = flow.id.trim().is_empty();
+    if flow.id.trim().is_empty() {
+        flow.id = next_id();
+    }
+    if flow.name.trim().is_empty() {
+        flow.name = "Yeni Flow".into();
+    }
+    flow.updated_at = now_iso();
+    save_single_flow_to_disk(&app, &flow)?;
+    if is_new {
+        append_activity(&app, "flow.created", Some(flow.name.clone()));
+    }
+    Ok(flow)
+}
+
+#[tauri::command]
+fn delete_flow(app: AppHandle, flow_id: String) -> Result<(), String> {
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let dir = flows_dir(&app)?;
+    let stem = safe_id_filename(&flow_id);
+    for ext in ["json", "json.bak", "json.corrupt"] {
+        let p = dir.join(format!("{stem}.{ext}"));
+        if p.exists() { let _ = fs::remove_file(&p); }
+    }
+    append_activity(&app, "flow.deleted", None);
     Ok(())
 }
 
@@ -5129,45 +5691,317 @@ fn export_csv_report(_app: AppHandle, csv_content: String) -> Result<String, Str
 /// Returns an empty array (never an error) when the plugins folder is
 /// missing. That keeps the API call cheap on every page mount even
 /// for users with no plugins installed.
-#[tauri::command]
-fn list_plugin_manifests(app: AppHandle) -> Result<String, String> {
-    let root = data_root(&app)?;
-    let plugins_dir = root.join("plugins");
-    if !plugins_dir.exists() || !plugins_dir.is_dir() {
-        return Ok(String::from("[]"));
+// ═══ Plugin system (v0.9.9) ═══════════════════════════════════════════════
+//
+// Plugins are INSTALLATION-GLOBAL (`<app-data>/plugins/<id>/`), not
+// workspace-scoped — a shared team folder must never be able to push
+// executable code onto a teammate's machine. Each plugin ships a
+// `heravex.plugin.json` manifest plus a single bundled ES-module entry.
+//
+// Install flow is consent-gated in three steps so the frontend can show
+// the permission screen BEFORE anything lands in the plugins dir:
+//   1. plugin_fetch(source)   — source is a local .zip/.hvx path OR an
+//      http(s) URL; stages the archive under plugins/.staging/ and
+//      returns the parsed+validated manifest.
+//   2. plugin_install(staged) — extracts the staged archive (zip-slip
+//      safe) into plugins/<id>/, replacing any existing version.
+//   3. plugin_discard(staged) — user hit cancel; delete the staged file.
+
+fn plugins_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = root_dir(app)?.join("plugins");
+    fs::create_dir_all(&dir).map_err(|e| format!("plugins dizini olusturulamadi: {e}"))?;
+    Ok(dir)
+}
+
+fn valid_plugin_id(id: &str) -> bool {
+    id.len() >= 2 && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !id.starts_with('-') && !id.starts_with('.')
+}
+
+/// Locate `heravex.plugin.json` inside the archive: either at the root
+/// or under exactly one top-level folder (the shape you get when a user
+/// zips the plugin folder itself). Returns (root_prefix, manifest).
+fn zip_find_manifest(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> Result<(String, serde_json::Value), String> {
+    use std::io::Read;
+    let mut candidates: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
+        let name = archive.by_index(i).map_err(|e| e.to_string())?.name().to_string();
+        if name == "heravex.plugin.json" || (name.ends_with("/heravex.plugin.json") && name.matches('/').count() == 1) {
+            candidates.push(name);
+        }
     }
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    let entries = match fs::read_dir(&plugins_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(String::from("[]")),
+    // Prefer a root-level manifest; else exactly one nested candidate.
+    candidates.sort_by_key(|n| n.matches('/').count());
+    let manifest_name = candidates.first()
+        .ok_or_else(|| "Arsivde heravex.plugin.json bulunamadi.".to_string())?
+        .clone();
+    let prefix = manifest_name.strip_suffix("heravex.plugin.json").unwrap_or("").to_string();
+    let mut raw = String::new();
+    archive.by_name(&manifest_name).map_err(|e| e.to_string())?
+        .read_to_string(&mut raw).map_err(|e| e.to_string())?;
+    let manifest: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("Manifest JSON hatali: {e}"))?;
+    Ok((prefix, manifest))
+}
+
+fn validate_plugin_manifest(
+    manifest: &serde_json::Value,
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    prefix: &str,
+) -> Result<(), String> {
+    let id = manifest.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if !valid_plugin_id(id) {
+        return Err("Manifest 'id' gecersiz (kucuk harf, rakam ve tire; 2-64 karakter).".into());
+    }
+    if manifest.get("name").and_then(|v| v.as_str()).map(str::trim).unwrap_or("").is_empty() {
+        return Err("Manifest 'name' zorunlu.".into());
+    }
+    if manifest.get("apiVersion").and_then(|v| v.as_u64()) != Some(1) {
+        return Err("Desteklenmeyen apiVersion (1 bekleniyor).".into());
+    }
+    let entry = manifest.get("entry").and_then(|v| v.as_str()).unwrap_or("index.js");
+    if entry.contains("..") || entry.starts_with('/') || entry.starts_with('\\') {
+        return Err("Manifest 'entry' yolu gecersiz.".into());
+    }
+    let entry_name = format!("{prefix}{entry}");
+    if archive.by_name(&entry_name).is_err() {
+        return Err(format!("Giris dosyasi arsivde yok: {entry}"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginFetchResult {
+    manifest: serde_json::Value,
+    staged: String,
+}
+
+/// Stage a plugin archive from a local path or URL and return its
+/// validated manifest for the consent screen. Nothing is installed yet.
+#[tauri::command]
+async fn plugin_fetch(app: AppHandle, source: String) -> Result<PluginFetchResult, String> {
+    let staging_dir = plugins_root(&app)?.join(".staging");
+    fs::create_dir_all(&staging_dir).map_err(|e| e.to_string())?;
+    let staged = staging_dir.join(format!("{}.zip", uuid::Uuid::new_v4().simple()));
+
+    let src = source.trim().to_string();
+    if src.starts_with("http://") || src.starts_with("https://") {
+        let resp = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build().map_err(|e| e.to_string())?
+            .get(&src).send().await
+            .map_err(|e| format!("Indirme basarisiz: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("Indirme basarisiz: HTTP {}", resp.status()));
+        }
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        if bytes.len() > 50 * 1024 * 1024 {
+            return Err("Eklenti arsivi cok buyuk (50MB siniri).".into());
+        }
+        fs::write(&staged, &bytes).map_err(|e| e.to_string())?;
+    } else {
+        let from = PathBuf::from(&src);
+        if !from.is_file() {
+            return Err(format!("Dosya bulunamadi: {src}"));
+        }
+        fs::copy(&from, &staged).map_err(|e| e.to_string())?;
+    }
+
+    // Validate: must be a zip containing a manifest + entry module.
+    let file = std::fs::File::open(&staged).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|_| { let _ = fs::remove_file(&staged); "Dosya gecerli bir eklenti arsivi degil (.zip/.hvx bekleniyor).".to_string() })?;
+    let (prefix, manifest) = match zip_find_manifest(&mut archive) {
+        Ok(v) => v,
+        Err(e) => { let _ = fs::remove_file(&staged); return Err(e); }
     };
+    if let Err(e) = validate_plugin_manifest(&manifest, &mut archive, &prefix) {
+        let _ = fs::remove_file(&staged);
+        return Err(e);
+    }
+    Ok(PluginFetchResult { manifest, staged: staged.to_string_lossy().to_string() })
+}
+
+/// Extract a previously staged archive into plugins/<id>/ (consent given).
+#[tauri::command]
+fn plugin_install(app: AppHandle, staged: String) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    let staged_path = PathBuf::from(&staged);
+    let staging_dir = plugins_root(&app)?.join(".staging");
+    if !staged_path.starts_with(&staging_dir) || !staged_path.is_file() {
+        return Err("Gecersiz kurulum dosyasi.".into());
+    }
+    let file = std::fs::File::open(&staged_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let (prefix, manifest) = zip_find_manifest(&mut archive)?;
+    validate_plugin_manifest(&manifest, &mut archive, &prefix)?;
+    let id = manifest.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let target = plugins_root(&app)?.join(&id);
+    if target.exists() {
+        fs::remove_dir_all(&target).map_err(|e| format!("Eski surum silinemedi: {e}"))?;
+    }
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        // Zip-slip guard: only accept paths that stay inside the archive root.
+        let Some(enclosed) = entry.enclosed_name() else { continue };
+        let rel = enclosed.to_string_lossy().replace('\\', "/");
+        let Some(stripped) = rel.strip_prefix(&prefix) else { continue };
+        if stripped.is_empty() { continue; }
+        let out_path = target.join(stripped);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        fs::write(&out_path, &buf).map_err(|e| e.to_string())?;
+    }
+    let _ = fs::remove_file(&staged_path);
+    append_activity(&app, "plugin.installed", manifest.get("name").and_then(|v| v.as_str()).map(String::from));
+    Ok(manifest)
+}
+
+/// User cancelled the consent screen — drop the staged archive.
+#[tauri::command]
+fn plugin_discard(app: AppHandle, staged: String) -> Result<(), String> {
+    let staged_path = PathBuf::from(&staged);
+    let staging_dir = plugins_root(&app)?.join(".staging");
+    if staged_path.starts_with(&staging_dir) && staged_path.is_file() {
+        let _ = fs::remove_file(&staged_path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn plugin_uninstall(app: AppHandle, id: String) -> Result<(), String> {
+    if !valid_plugin_id(&id) {
+        return Err("Gecersiz eklenti kimligi.".into());
+    }
+    let dir = plugins_root(&app)?.join(&id);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).map_err(|e| format!("Eklenti silinemedi: {e}"))?;
+    }
+    append_activity(&app, "plugin.uninstalled", Some(id));
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledPluginEntry {
+    manifest: serde_json::Value,
+    /// Absolute path to the entry module — the frontend reads it and
+    /// imports the code as a Blob URL (CSP: script-src blob:).
+    entry_path: String,
+    dir: String,
+}
+
+/// Enumerate installed plugins from the GLOBAL plugins directory.
+#[tauri::command]
+fn plugins_list(app: AppHandle) -> Result<Vec<InstalledPluginEntry>, String> {
+    let root = plugins_root(&app)?;
+    let mut out = Vec::new();
+    let entries = match fs::read_dir(&root) { Ok(e) => e, Err(_) => return Ok(out) };
     for entry in entries.flatten() {
         let dir = entry.path();
         if !dir.is_dir() { continue; }
+        let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if dir_name.starts_with('.') { continue; } // .staging
         let manifest_path = dir.join("heravex.plugin.json");
-        if !manifest_path.exists() { continue; }
-        let raw = match fs::read_to_string(&manifest_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let manifest: serde_json::Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // Default entry filename if the manifest omits it.
-        let entry_name = manifest.get("entry")
-            .and_then(|v| v.as_str())
-            .unwrap_or("widget.js");
-        let entry_url = format!(
-            "file://{}",
-            dir.join(entry_name).to_string_lossy().replace('\\', "/"),
-        );
-        out.push(serde_json::json!({
-            "manifest": manifest,
-            "entryUrl": entry_url,
-        }));
+        let raw = match fs::read_to_string(&manifest_path) { Ok(s) => s, Err(_) => continue };
+        let manifest: serde_json::Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => continue };
+        let entry_name = manifest.get("entry").and_then(|v| v.as_str()).unwrap_or("index.js");
+        let entry_path = dir.join(entry_name);
+        if !entry_path.is_file() { continue; }
+        out.push(InstalledPluginEntry {
+            manifest,
+            entry_path: entry_path.to_string_lossy().to_string(),
+            dir: dir.to_string_lossy().to_string(),
+        });
     }
-    serde_json::to_string(&out).map_err(|e| e.to_string())
+    Ok(out)
+}
+
+#[tauri::command]
+fn pick_plugin_zip() -> Result<String, String> {
+    let picked = FileDialog::new()
+        .set_title("Eklenti arsivi sec")
+        .add_filter("HeraVex Eklentisi", &["zip", "hvx"])
+        .pick_file()
+        .ok_or_else(|| "Eklenti secimi iptal edildi.".to_string())?;
+    Ok(picked.to_string_lossy().to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginHttpResponse {
+    status: u16,
+    body: String,
+    content_type: Option<String>,
+}
+
+/// HTTP proxy for plugins (`hv.fetch`). The webview CSP rightfully
+/// blocks plugin `fetch()` to arbitrary hosts, so network-permitted
+/// plugins route through reqwest instead — same pattern as the FX-rate
+/// fetcher. Response bodies are text and capped at 10MB.
+#[tauri::command]
+async fn plugin_http_fetch(
+    url: String,
+    method: Option<String>,
+    body: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+) -> Result<PluginHttpResponse, String> {
+    let trimmed = url.trim().to_string();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("Yalnizca http(s):// adresleri desteklenir.".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let m = method.unwrap_or_else(|| "GET".into()).to_uppercase();
+    let mut req = match m.as_str() {
+        "GET" => client.get(&trimmed),
+        "POST" => client.post(&trimmed),
+        "PUT" => client.put(&trimmed),
+        "PATCH" => client.patch(&trimmed),
+        "DELETE" => client.delete(&trimmed),
+        "HEAD" => client.head(&trimmed),
+        other => return Err(format!("Desteklenmeyen HTTP metodu: {other}")),
+    };
+    if let Some(map) = headers {
+        for (k, v) in map {
+            req = req.header(k, v);
+        }
+    }
+    if let Some(b) = body {
+        req = req.body(b);
+    }
+    let resp = req.send().await.map_err(|e| format!("Istek basarisiz: {e}"))?;
+    let status = resp.status().as_u16();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > 10 * 1024 * 1024 {
+        return Err("Yanit cok buyuk (10MB siniri).".into());
+    }
+    Ok(PluginHttpResponse {
+        status,
+        body: String::from_utf8_lossy(&bytes).to_string(),
+        content_type,
+    })
 }
 
 /// Lightweight fingerprint of the active workspace data root. Used by
@@ -5176,6 +6010,57 @@ fn list_plugin_manifests(app: AppHandle) -> Result<String, String> {
 /// is unreliable. Walks games.json, notes.json, activity.json, and the
 /// library/ subtree non-recursively at the game-folder level — enough
 /// to catch new games and edits without blowing CPU.
+///
+/// v0.9.7 — per-file modification manifest for fine-grained team sync.
+///
+/// Returns a map of `relative_path → mtime_secs` for every file that
+/// the frontend cares about. The frontend diffs successive manifests
+/// to dispatch *targeted* refresh events: when only `notes.json`
+/// changed, the active NoteCenter silently re-fetches notes — no
+/// modal, no full `refreshGames`, no jarring reload.
+///
+/// Why this replaces the global signature: a single hash collapses
+/// every change into one yes/no event, which forced the UI to ask
+/// "something changed somewhere, refresh?". With per-file mtimes the
+/// UI can answer "what changed, who needs to know?" itself.
+#[tauri::command]
+fn workspace_manifest(app: AppHandle) -> Result<std::collections::HashMap<String, u64>, String> {
+    let root = data_root(&app)?;
+    let mut out = std::collections::HashMap::new();
+    if !root.exists() { return Ok(out); }
+    fn visit(dir: &PathBuf, root: &PathBuf, depth: u32, out: &mut std::collections::HashMap<String, u64>) {
+        if depth > 4 { return; }
+        let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let md = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+            if md.is_dir() {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                // Skip noisy directories — backups churn on every run,
+                // plugins are user-installed, target is build output.
+                if matches!(name, "backups" | "Saves" | "plugins" | "target" | "node_modules") {
+                    continue;
+                }
+                visit(&p, root, depth + 1, out);
+            } else if md.is_file() {
+                let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                // Only track files the frontend understands. Anything
+                // else is noise (cover images, build artifacts, etc.).
+                let track = rel.ends_with(".json") || rel == "heravex-members.json";
+                if !track { continue; }
+                let mtime = md.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                out.insert(rel, mtime);
+            }
+        }
+    }
+    visit(&root, &root, 0, &mut out);
+    Ok(out)
+}
+
 #[tauri::command]
 fn compute_workspace_signature(app: AppHandle) -> Result<String, String> {
     let root = data_root(&app)?;
@@ -5351,8 +6236,15 @@ fn main() {
             save_exchange_rates,
             fetch_live_exchange_rates,
             team_read_members,
+            team_read_members_versioned,
             team_write_members,
+            team_write_members_cas,
+            team_write_self,
+            team_write_roles,
+            team_remove_member_file,
+            team_read_team,
             search_notes,
+            workspace_manifest,
             save_currency_labels,
             save_release_template,
             delete_game,
@@ -5375,14 +6267,19 @@ fn main() {
             open_external,
             export_notes_pdf,
             get_all_notes,
+            read_note,
             save_note,
             delete_note,
+            load_flows,
+            save_flow,
+            delete_flow,
             export_global_note_pdf,
             save_image_to_disk,
             save_api_keys,
             pick_and_save_avatar,
             pick_directory,
             pick_google_play_json,
+            pick_asset_file,
             clear_avatar,
             save_store_mapping,
             unlink_store_mapping,
@@ -5395,7 +6292,13 @@ fn main() {
             clear_workspace_path,
             read_activity_log,
             compute_workspace_signature,
-            list_plugin_manifests,
+            plugins_list,
+            plugin_fetch,
+            plugin_install,
+            plugin_discard,
+            plugin_uninstall,
+            pick_plugin_zip,
+            plugin_http_fetch,
             export_backup_silent
         ])
         .run(tauri::generate_context!())

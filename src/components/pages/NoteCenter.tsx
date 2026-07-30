@@ -4,9 +4,8 @@ import {
   Plus, Trash2, NotebookPen, Pencil, BookOpen, FileText, Gamepad2,
 } from "lucide-react";
 import { useAppStore } from "../../store";
-import {
-  getAllNotes, saveNote, exportGlobalNotePdf, exportNotesPdf,
-} from "../../lib/storage";
+import { getAllNotes, saveNote, readNote } from "../../lib/storage";
+import { merge3 } from "../../lib/mergeNotes";
 import { MarkdownWorkspace, type SaveStatus, type MarkdownTemplate } from "../shared/MarkdownWorkspace";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { useListKeyNav } from "../../lib/useListKeyNav";
@@ -61,6 +60,10 @@ export function NoteCenter() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Per-note "base" content = what we loaded or last saved from disk.
+  // The 3-way merge compares base (ancestor) · draft (ours) · disk (theirs)
+  // so a teammate's concurrent edit is merged in, not clobbered.
+  const baseByIdRef = useRef<Map<string, string>>(new Map());
 
   // v0.9 — drag-to-reorder state for the studio notes list. Mirrors
   // the Kanban column-drag pattern: we only track which item the
@@ -248,8 +251,27 @@ export function NoteCenter() {
         }
       })();
     };
+    // v0.9.7 — team-mode granular sync. The store fires the local-only
+    // `notes-updated` event after a moodboard cascade; the team-sync
+    // module fires `notes-file-changed` when notes.json's mtime moves
+    // on disk (i.e. a teammate saved a note). Both call the same
+    // silent refetch — no toast, no modal, no full refreshGames.
     window.addEventListener("heravex:notes-updated", handler);
-    return () => window.removeEventListener("heravex:notes-updated", handler);
+    window.addEventListener("heravex:notes-file-changed", handler);
+    return () => {
+      window.removeEventListener("heravex:notes-updated", handler);
+      window.removeEventListener("heravex:notes-file-changed", handler);
+    };
+  }, []);
+
+  // Flow Center ref nodes can deep-link to a specific note.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const noteId = (e as CustomEvent<{ noteId?: string }>).detail?.noteId;
+      if (noteId) setSelection({ kind: "global", noteId });
+    };
+    window.addEventListener("heravex:flow-open-note", onOpen);
+    return () => window.removeEventListener("heravex:flow-open-note", onOpen);
   }, []);
 
   // ── Vim-style j/k navigation on the global notes list ───────────────
@@ -284,6 +306,7 @@ export function NoteCenter() {
     if (activeNote) {
       setDraft(activeNote.content);
       setDraftTitle(activeNote.title);
+      baseByIdRef.current.set(activeNote.id, activeNote.content);
       setSaveStatus("idle");
     } else if (activeGame) {
       setDraft(activeGame.notes ?? "");
@@ -301,7 +324,29 @@ export function NoteCenter() {
     async (note: NoteRecord) => {
       setSaveStatus("saving");
       try {
-        const saved = await saveNote(note);
+        let toSave = note;
+        // Team-mode 3-way merge: if the on-disk note changed since we
+        // loaded it (a teammate saved), merge their blocks with ours
+        // instead of overwriting them.
+        const base = note.id ? baseByIdRef.current.get(note.id) : undefined;
+        if (base != null && note.id) {
+          try {
+            const disk = await readNote(note.id);
+            if (disk && disk.content !== base && disk.content !== note.content) {
+              const { merged, conflicts } = merge3(base, note.content, disk.content);
+              toSave = { ...note, content: merged };
+              if (draft === note.content) setDraft(merged); // reflect in the editor
+              showToast(
+                conflicts === 0
+                  ? tr("Merged your teammate's changes.", "Ekip arkadaşının değişiklikleri birleştirildi.")
+                  : tr("Merged — check the duplicated block(s) from a conflict.", "Birleştirildi — çakışmadan gelen tekrarlanan blokları kontrol et."),
+                conflicts === 0 ? "info" : "warning",
+              );
+            }
+          } catch { /* merge best-effort — fall back to plain save */ }
+        }
+        const saved = await saveNote(toSave);
+        baseByIdRef.current.set(saved.id, saved.content);
         setNotes((prev) => {
           const others = prev.filter((n) => n.id !== saved.id);
           return [saved, ...others].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -312,7 +357,8 @@ export function NoteCenter() {
         setSaveStatus("idle");
       }
     },
-    [showToast]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [showToast, draft]
   );
 
   const persistProject = useCallback(
