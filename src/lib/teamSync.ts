@@ -38,6 +38,14 @@ let heartbeatTimer: number | null = null;
 let lastManifest: Manifest | null = null;
 let failStreak = 0;
 let notifiedDown = false;
+// Overlap guard. The interval, the Rust file-watcher nudge and the
+// "Check now" button can all ask for a poll at once; on a slow cloud
+// drive the manifest walk can outlast the 2s interval. Overlapping
+// polls raced on `lastManifest` and fired the same delta twice (double
+// reloads while typing). Now: one poll at a time, and a request that
+// arrives mid-poll schedules exactly one follow-up.
+let pollInFlight: Promise<void> | null = null;
+let pollQueued = false;
 
 interface StartOpts {
   /** Called when the polling loop hits FAIL_THRESHOLD in a row, so the
@@ -111,11 +119,34 @@ async function isTeamWorkspaceActive(): Promise<{ active: boolean; path: string 
   return { active: true, path, ws };
 }
 
-async function pollOnce(): Promise<void> {
+function pollOnce(): Promise<void> {
+  if (pollInFlight) {
+    pollQueued = true;
+    return pollInFlight;
+  }
+  pollInFlight = (async () => {
+    try {
+      do {
+        pollQueued = false;
+        await pollOnceInner();
+      } while (pollQueued);
+    } finally {
+      pollInFlight = null;
+    }
+  })();
+  return pollInFlight;
+}
+
+async function pollOnceInner(): Promise<void> {
   const { active, path } = await isTeamWorkspaceActive();
   if (!active || !path) return;
   try {
-    const manifest = await invoke<Manifest>("workspace_manifest");
+    // A stalled cloud drive can hang the walk; with the overlap guard
+    // that would stop sync for good. Treat a slow walk as a failed tick.
+    const manifest = await Promise.race([
+      invoke<Manifest>("workspace_manifest"),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("manifest timeout")), 30_000)),
+    ]);
     try { localStorage.setItem(STORAGE_KEY_LAST_CHECK, String(Date.now())); } catch { /* quota */ }
     if (failStreak > 0) {
       failStreak = 0;
@@ -157,21 +188,39 @@ function dispatchDelta(prev: Manifest, next: Manifest): boolean {
 
   // Categorise: notes vs members vs activity vs game files.
   const changedGameIds: string[] = [];
+  const changedNoteIds: string[] = [];
+  const removedNoteIds: string[] = [];
+  let legacyNotesChanged = false;
+  let assetsChanged = false;
   let notesChanged = false;
   let membersChanged = false;
   let activityChanged = false;
   let settingsChanged = false;
   let flowsChanged = false;
+  let walletChanged = false;
   for (const path of changed) {
     // Notes are per-id files under notes/<id>.json (the single notes.json
     // is legacy). Matching only "notes.json" meant teammate note edits
     // never propagated — fixed here.
-    if (path === "notes.json" || path.startsWith("notes/")) { notesChanged = true; continue; }
+    if (path === "notes.json") { notesChanged = true; legacyNotesChanged = true; continue; }
+    const nm = /^notes\/(.+?)\.json$/.exec(path);
+    if (nm) {
+      notesChanged = true;
+      if (path in next) changedNoteIds.push(nm[1]); else removedNoteIds.push(nm[1]);
+      continue;
+    }
+    if (path.startsWith("notes/")) { notesChanged = true; legacyNotesChanged = true; continue; }
+    // Cover / moodboard images landing from the cloud client. They are
+    // tracked separately from the game JSON because they arrive on
+    // their own schedule — see lib/images.ts broken-image recovery.
+    if (path.startsWith("library/") && /\.(png|jpe?g|webp|gif|bmp)$/i.test(path)) { assetsChanged = true; continue; }
     // v0.9.8 — presence-per-user lives under heravex-members/<id>.json.
     // The legacy single-file path is kept for back-compat.
     if (path === "heravex-members.json" || path.startsWith("heravex-members/")) { membersChanged = true; continue; }
     if (path === "activity.json") { activityChanged = true; continue; }
     if (path === "settings.json") { settingsChanged = true; continue; }
+    // v0.9.9 — general expenses + currency list, per workspace.
+    if (path === "wallet.json") { walletChanged = true; continue; }
     const m = /^games\/(.+?)\.json$/.exec(path);
     if (m) { changedGameIds.push(m[1]); continue; }
     // v0.9.8 — Flow Center files live under flows/{id}.json. We don't
@@ -181,7 +230,15 @@ function dispatchDelta(prev: Manifest, next: Manifest): boolean {
   }
 
   if (notesChanged) {
-    window.dispatchEvent(new CustomEvent("heravex:notes-file-changed"));
+    // With ids, NoteCenter re-reads just those files and skips the ones
+    // whose content it already has (our own save echoing back). Without
+    // ids (legacy single-file layout) it falls back to a full reload.
+    window.dispatchEvent(new CustomEvent("heravex:notes-file-changed", {
+      detail: legacyNotesChanged ? undefined : { noteIds: changedNoteIds, removedNoteIds },
+    }));
+  }
+  if (assetsChanged) {
+    window.dispatchEvent(new CustomEvent("heravex:assets-changed"));
   }
   if (membersChanged) {
     // Fire both: `members-file-changed` for the sidebar presence dots and
@@ -198,6 +255,9 @@ function dispatchDelta(prev: Manifest, next: Manifest): boolean {
   }
   if (flowsChanged) {
     window.dispatchEvent(new CustomEvent("heravex:flow-file-changed"));
+  }
+  if (walletChanged) {
+    window.dispatchEvent(new CustomEvent("heravex:wallet-file-changed"));
   }
   if (changedGameIds.length > 0) {
     window.dispatchEvent(new CustomEvent("heravex:games-list-changed", {

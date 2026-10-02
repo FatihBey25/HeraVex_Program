@@ -26,17 +26,21 @@ import {
   Sparkles,
   Wrench,
   FileText,
+  Trash2,
   type LucideIcon,
+  PanelLeftOpen, PanelLeftClose,
 } from "lucide-react";
 import { getPluginPages, type PluginPageItem } from "../lib/plugins";
 import { useAppStore, type WorkspaceTab } from "../store";
 import { StudioHubLogo } from "./shared/StudioHubLogo";
+import { ConfirmDialog } from "./shared/ConfirmDialog";
 import { imgSrc } from "../lib/images";
 import logoMarkUrl from "../assets/logo-mark.svg";
 import {
   loadWorkspaces,
   resolveActiveWorkspace,
   switchToWorkspace,
+  removeWorkspace,
   type Workspace,
 } from "../lib/workspaces";
 import { getWorkspacePath } from "../lib/storage";
@@ -166,6 +170,14 @@ export function Sidebar({
 
   // ── Workspace dropdown ─────────────────────────────────────────────────
   const [wsOpen, setWsOpen] = useState(false);
+  // Rail mode (narrow window / Settings → Layout): the drawer is open.
+  const [railOpen, setRailOpen] = useState(false);
+  useEffect(() => {
+    if (!railOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setRailOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [railOpen]);
   const wsRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -177,6 +189,9 @@ export function Sidebar({
 
   // ── Workspace registry + active resolution ──────────────────────────────
   const [workspaces, setWorkspaces] = useState<Workspace[]>(() => loadWorkspaces());
+  // Workspace pending removal — drives the in-app ConfirmDialog (replaces
+  // the browser's window.confirm, which looked out of place).
+  const [confirmRemove, setConfirmRemove] = useState<Workspace | null>(null);
   const [activePath, setActivePath] = useState<string | null>(null);
 
   useEffect(() => {
@@ -314,6 +329,24 @@ export function Sidebar({
     return `${head}…${tail}`;
   };
 
+  // Forget a workspace (local OR team) — removes the registry entry;
+  // files on disk are untouched. Confirmation goes through the in-app
+  // ConfirmDialog (setConfirmRemove), never window.confirm.
+  const doRemoveWorkspace = async (ws: Workspace) => {
+    setConfirmRemove(null);
+    const wasActive = ws.id === activeWs.id;
+    const next = removeWorkspace(ws.id);
+    setWorkspaces(next);
+    showToast(
+      language === "tr" ? `"${ws.name}" kaldırıldı` : `"${ws.name}" removed`,
+      "info",
+    );
+    if (wasActive) {
+      const def = next.find((w) => w.id === "default") ?? next[0];
+      if (def) await handleSwitchWorkspace(def);
+    }
+  };
+
   const handleSwitchWorkspace = async (ws: Workspace) => {
     if (ws.id === activeWs.id) {
       setWsOpen(false);
@@ -384,7 +417,20 @@ export function Sidebar({
   }
 
   return (
-    <aside className="sidebar modern-sidebar">
+    <>
+    {railOpen && <div className="sidebar-rail-backdrop" onClick={() => setRailOpen(false)} aria-hidden="true" />}
+    <aside className={`sidebar modern-sidebar${railOpen ? " is-expanded" : ""}`}>
+      <button
+        type="button"
+        className="sidebar-rail-toggle"
+        onClick={() => setRailOpen((o) => !o)}
+        aria-expanded={railOpen}
+        title={railOpen
+          ? (language === "tr" ? "Menüyü daralt" : "Collapse menu")
+          : (language === "tr" ? "Menüyü genişlet" : "Expand menu")}
+      >
+        {railOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
+      </button>
       {/* Workspace brand card (clickable dropdown) */}
       <div className="sidebar-workspace-wrap" ref={wsRef}>
         <button
@@ -543,9 +589,12 @@ export function Sidebar({
                 .map((ws) => {
                   const isActive = ws.id === activeWs.id;
                   const leaf = ws.path ? (ws.path.split(/[\\/]/).filter(Boolean).pop() ?? "") : "";
+                  // The synthetic "default" entry can't be removed; every
+                  // other local workspace gets a remove button.
+                  const removable = ws.id !== "default";
                   return (
+                    <div key={ws.id} className={`sidebar-ws-item-row ${isActive ? "is-active" : ""}`}>
                     <button
-                      key={ws.id}
                       type="button"
                       className={`sidebar-ws-item sidebar-ws-item-workspace ${isActive ? "is-active" : ""}`}
                       onClick={() => void handleSwitchWorkspace(ws)}
@@ -564,6 +613,18 @@ export function Sidebar({
                       </div>
                       {isActive && <span className="sidebar-ws-active-dot" aria-hidden="true" />}
                     </button>
+                    {removable && (
+                      <button
+                        type="button"
+                        className="sidebar-ws-remove"
+                        onClick={() => setConfirmRemove(ws)}
+                        title={language === "tr" ? "Çalışma alanını listeden kaldır" : "Remove workspace"}
+                        aria-label={language === "tr" ? "Çalışma alanını kaldır" : "Remove workspace"}
+                      >
+                        <Trash2 size={12} strokeWidth={2.1} />
+                      </button>
+                    )}
+                    </div>
                   );
                 })}
             </div>
@@ -584,24 +645,34 @@ export function Sidebar({
                   const isActive = ws.id === activeWs.id;
                   const leaf = ws.path ? (ws.path.split(/[\\/]/).filter(Boolean).pop() ?? "") : "";
                   return (
-                    <button
-                      key={ws.id}
-                      type="button"
-                      className={`sidebar-ws-item sidebar-ws-item-workspace sidebar-ws-item-team ${isActive ? "is-active" : ""}`}
-                      onClick={() => void handleSwitchWorkspace(ws)}
-                      role="menuitemradio"
-                      aria-checked={isActive}
-                      title={ws.path ?? ws.cloudProvider ?? undefined}
-                    >
-                      <CloudIcon size={13} strokeWidth={2.1} />
-                      <div className="sidebar-ws-item-text">
-                        <span className="sidebar-ws-name">{ws.name}</span>
-                        <span className="sidebar-ws-sub">
-                          {providerLabel(ws.cloudProvider)}{leaf ? ` · ${leaf}` : ""}
-                        </span>
-                      </div>
-                      {isActive && <span className="sidebar-ws-active-dot" aria-hidden="true" />}
-                    </button>
+                    <div key={ws.id} className={`sidebar-ws-item-row ${isActive ? "is-active" : ""}`}>
+                      <button
+                        type="button"
+                        className={`sidebar-ws-item sidebar-ws-item-workspace sidebar-ws-item-team ${isActive ? "is-active" : ""}`}
+                        onClick={() => void handleSwitchWorkspace(ws)}
+                        role="menuitemradio"
+                        aria-checked={isActive}
+                        title={ws.path ?? ws.cloudProvider ?? undefined}
+                      >
+                        <CloudIcon size={13} strokeWidth={2.1} />
+                        <div className="sidebar-ws-item-text">
+                          <span className="sidebar-ws-name">{ws.name}</span>
+                          <span className="sidebar-ws-sub">
+                            {providerLabel(ws.cloudProvider)}{leaf ? ` · ${leaf}` : ""}
+                          </span>
+                        </div>
+                        {isActive && <span className="sidebar-ws-active-dot" aria-hidden="true" />}
+                      </button>
+                      <button
+                        type="button"
+                        className="sidebar-ws-remove"
+                        onClick={() => setConfirmRemove(ws)}
+                        title={language === "tr" ? "Ekip klasörünü listeden kaldır" : "Remove team folder"}
+                        aria-label={language === "tr" ? "Ekip klasörünü kaldır" : "Remove team folder"}
+                      >
+                        <Trash2 size={12} strokeWidth={2.1} />
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -666,7 +737,9 @@ export function Sidebar({
                   <li key={item.key}>
                     <button
                       className={`nav-item ${active ? "nav-item-active" : ""}`}
-                      onClick={() => setWorkspaceTab(item.key)}
+                      onClick={() => { setWorkspaceTab(item.key); setRailOpen(false); }}
+                      title={item.label}
+                      aria-label={item.label}
                       data-tutorial={`nav-${item.key}`}
                     >
                       {active && layout.sidebarSlideIndicator !== false && (
@@ -690,6 +763,10 @@ export function Sidebar({
           </motion.div>
         ))}
       </nav>
+
+      {/* Version-safe plugin slot — full-width area under the nav list.
+          Use hv.dom.mountToSlot("sidebar-nav-end", el). */}
+      <div data-hv-slot="sidebar-nav-end" className="hv-slot hv-slot-block" />
 
       <div className="sidebar-bottom">
         <div className="profile-card-eyebrow">{t.navIdentity ?? "IDENTITY"}</div>
@@ -754,6 +831,22 @@ export function Sidebar({
         />
       )}
 
+      {confirmRemove && (
+        <ConfirmDialog
+          variant="danger"
+          title={confirmRemove.mode === "team"
+            ? (language === "tr" ? "Ekip klasörünü kaldır" : "Remove team folder")
+            : (language === "tr" ? "Çalışma alanını kaldır" : "Remove workspace")}
+          body={language === "tr"
+            ? `"${confirmRemove.name}" listeden kaldırılsın mı? Klasör ve dosyalar diskte kalır.`
+            : `Remove "${confirmRemove.name}" from the list? The folder and its files stay on disk.`}
+          confirmLabel={language === "tr" ? "Kaldır" : "Remove"}
+          cancelLabel={language === "tr" ? "Vazgeç" : "Cancel"}
+          onConfirm={() => void doRemoveWorkspace(confirmRemove)}
+          onCancel={() => setConfirmRemove(null)}
+        />
+      )}
+
       {/* Drag handle — direct manipulation companion to the
           Settings → Layout sidebar-width slider. Both write to the
           same `layout.sidebarWidth`, so changing one updates the
@@ -771,5 +864,6 @@ export function Sidebar({
         title={language === "tr" ? "Sürükleyip genişliği değiştir" : "Drag to resize"}
       />
     </aside>
+    </>
   );
 }

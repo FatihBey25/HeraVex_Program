@@ -2188,7 +2188,10 @@ label span {
 }
 
 .page-fade {
-  animation: pageFadeIn 150ms ease forwards;
+  /* Driven by the Layout → animation-speed setting (fast/standard/slow/
+     instant) instead of a hardcoded 150ms, so the page-open animation
+     actually responds to the control. */
+  animation: pageFadeIn var(--anim-duration, 0.18s) ease forwards;
 }
 
 /* 2. Card counter — CSS hook, driven by JS */
@@ -2337,35 +2340,11 @@ label span {
   }
 }
 
+/* Below 1220px only dialogs adapt here. Pages used to be forced into one
+   stacked column (with the sidebar as a row on top), which broke them at
+   ordinary laptop / split-screen sizes; each page now adapts on its own
+   (see "Small windows" at the end of this file). */
 @media (max-width: 1220px) {
-  .shell,
-  .content-grid,
-  .dashboard-grid,
-  .tasks-layout,
-  .notes-layout,
-  .wallet-layout,
-  .projects-summary,
-  .settings-grid,
-  .field-grid,
-  .analytics-grid,
-  .inline-grid,
-  .game-card,
-  .task-card {
-    grid-template-columns: 1fr;
-  }
-
-  .creator-layout,
-  .quick-insights,
-  .release-template-form,
-  .release-grid,
-  .moodboard-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .creator-full {
-    grid-column: auto;
-  }
-
   .creator-modal-backdrop {
     padding: 18px;
   }
@@ -2384,27 +2363,26 @@ label span {
     max-height: calc(100vh - 72px);
   }
 
-  .sidebar {
-    border-right: none;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  html,
-  body,
-  #root,
-  .shell {
-    overflow: auto;
-    height: auto;
-  }
-
-  .workspace,
-  .panel,
-  .detail-panel {
-    overflow: visible;
-  }
 }
 
 /* Wallet & Dynamic Currency Styles */
+/* v0.9.9 — offer to copy the pre-workspace wallet into this workspace */
+.wallet-legacy-offer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md, 10px);
+  background: var(--accent-softer);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  color: #dfe7f3;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.wallet-legacy-offer > svg { flex-shrink: 0; color: var(--accent); }
+.wallet-legacy-offer > span { flex: 1; min-width: 0; }
+.wallet-legacy-offer .primary-button { white-space: nowrap; }
+
 .wallet-tabs {
   display: flex;
   gap: 1rem;
@@ -2485,7 +2463,10 @@ label span {
   overflow-y: hidden;
   padding: 4px 2px 14px;
   flex: 1;
-  align-items: flex-start;
+  /* Establishes a definite height inside the flex-column page shell so
+   * columns can bound themselves to the REAL available space (below). */
+  min-height: 0;
+  align-items: stretch;
   scrollbar-width: thin;
   scrollbar-color: rgba(255,255,255,0.12) transparent;
 }
@@ -2506,10 +2487,13 @@ label span {
   border: 1px solid rgba(255,255,255,0.07);
   border-radius: 12px;
   overflow: hidden;
-  /* Column owns its own vertical scroll. The parent board (.kanban-board)
-   * doesn't scroll vertically, so this calc reserves space for the page
-   * shell (top bar + toolbars) and lets cards breathe at the bottom. */
-  max-height: calc(100vh - 200px);
+  /* Bound to the board's REAL height (not a 100vh guess). The old
+   * `calc(100vh - 200px)` under-reserved when toolbars were taller, so a
+   * column ran past the viewport and the last card was clipped BEFORE
+   * the scrollbar appeared. `max-height: 100%` = exact available space →
+   * the inner `.kanban-cards` scroller kicks in the instant content
+   * overflows, even by a few px. */
+  max-height: 100%;
   min-height: 0;
   transition: background 0.18s, border-color 0.18s, box-shadow 0.18s;
 }
@@ -4499,14 +4483,6 @@ label span {
   grid-template-columns: var(--sidebar-width, 248px) 1fr;
 }
 
-@media (max-width: 1220px) {
-  .shell {
-    grid-template-columns: 1fr;
-  }
-  .modern-nav {
-    overflow: visible;
-  }
-}
 
 /* ═══════════════════════════════════════════
    DASHBOARD HERO STATS (migrated from sidebar)
@@ -4596,7 +4572,9 @@ label span {
   opacity: 0.6;
 }
 
-@media (max-width: 1220px) {
+/* Three stat cards fit side by side down to small windows; stack only
+   when there is really no room. */
+@media (max-width: 760px) {
   .dashboard-hero-stats {
     grid-template-columns: 1fr;
   }
@@ -5390,7 +5368,7 @@ label span {
 
 /* Narrow window: collapse to single column. Sidebar becomes a
    horizontal tab strip pinned to the top. Mobile-first-style. */
-@media (max-width: 900px) {
+@media (max-width: 760px) {
   .settings-layout {
     grid-template-columns: 1fr;
   }
@@ -6357,7 +6335,7 @@ label span {
   min-height: 0;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 820px) {
   .note-center-layout {
     grid-template-columns: 1fr !important;
   }
@@ -9367,29 +9345,21 @@ body.is-resizing {
   left: 0;
   right: 0;
   z-index: 30;
-  /* Fully opaque — the workspace switcher is a menu surface, not a
-     glass panel. The background MUST cover whatever sits behind it
-     so the panel never reads as "see-through". */
+  /* Follows the active theme: the bulk `--theme-surface` rule (and any
+     plugin theme) tints this like every other surface. A heavy blur +
+     shadow keeps it readable over content even though the surface token
+     is translucent, so the menu harmonizes with the background instead
+     of staying a fixed blue-grey. Fallback for no active theme. */
   background: #111824;
-  background-image: linear-gradient(180deg, #131c2a, #0e1622);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--theme-surface, #111824);
+  backdrop-filter: blur(24px) saturate(1.5);
+  border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.08));
   border-radius: 14px;
   padding: 6px;
-  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
   gap: 2px;
-}
-
-/* Theme override winners — the `:root[class*="bg-main-"]…` rule at
-   line ~350 ships every panel-ish surface a `--theme-surface` with
-   alpha (rgba 0.8) marked `!important`, which beats the plain rule
-   above. The workspace switcher is a MENU, not a translucent panel,
-   so it has to read as fully opaque regardless of active theme. */
-.sidebar-workspace-menu,
-:root[class*="bg-main-"] .sidebar-workspace-menu {
-  background: #111824 !important;
-  background-image: linear-gradient(180deg, #131c2a, #0e1622) !important;
 }
 
 .sidebar-ws-item {
@@ -12509,6 +12479,9 @@ select:focus-visible,
   align-items: center;
   gap: 8px;
 }
+/* Studio logo: show the whole mark, don't crop it like a photo. */
+img.setting-logo-preview { object-fit: contain !important; padding: 2px; }
+
 .setting-avatar-preview,
 .setting-avatar-placeholder {
   width: 36px;
@@ -13037,7 +13010,11 @@ strong, b, .strong, .hero-stat-value, h1, h2, h3, h4, h5 {
 /* Most engines pick the OS popup for <option>, but Chromium-on-Tauri
    honours these properties so the open list matches the dark UI. */
 .setting-dropdown-select option {
-  background: #131c2d;
+  /* Follows the active accent (which every preset + plugin theme sets)
+     so the choice list stops clashing with the background. First line is
+     the fallback for engines without color-mix. */
+  background: #101828;
+  background: color-mix(in srgb, var(--accent) 7%, #0b1120);
   color: #f4f7fb;
 }
 .setting-dropdown-select option:checked {
@@ -14943,33 +14920,82 @@ select.input option {
 :root.density-relaxed .dashboard-panel { padding: 24px; gap: 18px; }
 :root.density-relaxed .panel-head h3 { font-size: 17px; }
 
-/* ── 3. Viewport-narrow auto-collapse. App.tsx adds these classes
-   under hysteresis (collapse at <1200px, expand at >1400px). The
-   sidebar drops to icon-only and the main padding tightens. */
-:root.viewport-narrow .shell {
-  --sidebar-width-effective: 64px;
+/* ── 3. Sidebar rail (v0.9.9 rewrite).
+   The sidebar becomes a 64px icon rail when the window is narrow
+   (App.tsx adds `viewport-narrow` under hysteresis: <1200px on,
+   >1400px off) or when Settings → Layout asks for it
+   (`sidebar-collapse-hover`). The rail never opens on hover — that
+   covered the page whenever the pointer crossed it. The toggle at the
+   top opens it as a drawer over the page (`.is-expanded`, with a
+   backdrop); picking a page, clicking outside or Esc closes it.
+   Icons carry a native tooltip with the page name. */
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .shell {
+  grid-template-columns: 64px minmax(0, 1fr);
 }
-:root.viewport-narrow .modern-sidebar {
-  width: 64px !important;
-  min-width: 64px !important;
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .modern-sidebar {
+  width: 64px;
+  min-width: 64px;
+  padding-left: 10px;
+  padding-right: 10px;
 }
-:root.viewport-narrow .modern-sidebar:not(:hover) .nav-item-label,
-:root.viewport-narrow .modern-sidebar:not(:hover) .sidebar-tab-label,
-:root.viewport-narrow .modern-sidebar:not(:hover) .nav-section-eyebrow,
-:root.viewport-narrow .modern-sidebar:not(:hover) .modern-brand-text,
-:root.viewport-narrow .modern-sidebar:not(:hover) .sidebar-brand-caret,
-:root.viewport-narrow .modern-sidebar:not(:hover) .nav-item-chev {
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .modern-sidebar:not(.is-expanded) :is(
+  .nav-item-label, .sidebar-tab-label, .nav-section-eyebrow, .modern-brand-text,
+  .sidebar-brand-caret, .nav-item-chev, .hv-slot, .sidebar-bottom
+) {
   display: none;
 }
-:root.viewport-narrow .modern-sidebar:not(:hover) .nav-item {
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .modern-sidebar:not(.is-expanded) .nav-item {
   justify-content: center;
-  padding: 8px 0;
+  padding: 9px 0;
 }
-:root.viewport-narrow .modern-sidebar:hover {
-  width: var(--sidebar-width, 300px) !important;
-  z-index: 60;
-  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .modern-sidebar:not(.is-expanded) .modern-brand {
+  grid-template-columns: 1fr;
+  padding: 6px;
+  justify-items: center;
 }
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .modern-sidebar.is-expanded {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 70;
+  width: min(var(--sidebar-width, 280px), 86vw);
+  min-width: 0;
+  padding-left: 14px;
+  padding-right: 14px;
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
+  /* Over the page: opaque, whatever the sidebar background theme (the
+     transparent theme is !important, hence the specificity here). */
+  background: linear-gradient(180deg, rgb(11, 16, 26), rgb(8, 12, 20)) !important;
+}
+.sidebar-rail-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  background: rgba(3, 6, 12, 0.45);
+  backdrop-filter: blur(2px);
+}
+.sidebar-rail-toggle { display: none; }
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .sidebar-rail-toggle {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 34px;
+  margin: 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: #9aabc1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .modern-sidebar.is-expanded .sidebar-rail-toggle {
+  margin: 0 0 0 auto;
+}
+.sidebar-rail-toggle:hover { background: rgba(255, 255, 255, 0.07); color: #f4f7fb; }
+.sidebar-rail-toggle:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+/* Width dragging makes no sense on a rail. */
+:root:is(.viewport-narrow, .sidebar-collapse-hover) .sidebar-drag-handle { display: none; }
 :root.viewport-very-narrow .dashboard-grid {
   grid-template-columns: 1fr;
 }
@@ -15758,6 +15784,14 @@ select.input option {
 .flow-empty-hint { margin-top: 14px; font-size: 12px; color: #8fa3bc; }
 
 /* ── Plugin system (v0.9.9) ────────────────────────────────────────── */
+/* Stable plugin injection slots (data-hv-slot). Empty by default they
+   take zero space; once a plugin mounts into one, its own element
+   drives layout. `:empty` keeps a clean UI for plugin-less users. */
+.hv-slot:empty { display: none; }
+.hv-slot-inline { display: inline-flex; align-items: center; }
+.hv-slot-block { display: block; }
+.hv-slot-block:not(:empty) { margin: 8px 0; }
+
 .plugin-page {
   display: flex;
   flex-direction: column;
@@ -16848,3 +16882,505 @@ select.input option {
   .dashboard-hero-activity { max-width: 100%; margin-left: 0; }
 }
 
+
+/* ═══ v0.9.9 Batch 2 — theme-surface consistency ═══════════════════════
+   Surfaces the per-preset theme rules missed, so modals + nested detail
+   boxes follow the chosen background (and plugin themes, which override
+   --theme-surface). Appended last so equal-specificity !important ties
+   resolve in our favour. */
+
+/* Modal shells the theme system skipped → follow the active surface.
+   Fixes the kanban task modal showing a hardcoded colour while its inner
+   template was theme-tinted (the "two opposite colours" bug). */
+:root[class*="bg-main-"]:not(.bg-main-standard) .modal-box,
+:root[class*="bg-main-"]:not(.bg-main-standard) .confirm-dialog,
+:root[class*="bg-main-"]:not(.bg-main-standard) .report-preview-modal,
+:root[class*="bg-main-"]:not(.bg-main-standard) .split-button-menu,
+:root[class*="bg-main-"]:not(.bg-main-standard) .plugin-consent {
+  background: var(--theme-surface, rgba(17, 24, 36, 0.92)) !important;
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.08)) !important;
+}
+
+/* The inner task-detail template (.tab-panel) is pure layout — never a
+   second surface. Flattening it kills the nested double-box look in the
+   detail panel AND the dual-colour clash inside the kanban modal. */
+.task-detail-panel .tab-panel,
+.kanban-task-modal .tab-panel,
+.detail-panel-modal .tab-panel {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Related-notes box at the bottom of the template → match the theme's
+   input tint instead of a fixed grey. */
+:root[class*="bg-main-"]:not(.bg-main-standard) .related-note-field {
+  background: var(--theme-input, rgba(255, 255, 255, 0.04)) !important;
+  border-color: var(--theme-border, rgba(255, 255, 255, 0.08)) !important;
+}
+
+/* Team-folder row = switch button + a remove (forget) button (v0.9.9). */
+.sidebar-ws-item-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.sidebar-ws-item-row .sidebar-ws-item { flex: 1; min-width: 0; }
+.sidebar-ws-remove {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #8fa3bc;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.14s, background 0.14s, color 0.14s, border-color 0.14s;
+}
+.sidebar-ws-item-row:hover .sidebar-ws-remove { opacity: 1; }
+.sidebar-ws-remove:hover {
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+}
+/* == Store Center (v0.9.9, final) ========================================
+   Built on the shared parts (panel, panel-head, eyebrow,
+   financial-report-head-icon, hero-stat-card, filter-chip, skeleton-card,
+   storehub-hero) so it matches Dashboard / Analytics. Only the layout and
+   the comparison / highlight lists are specific to this page. */
+.sh-page {
+  container: storehub / inline-size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 1. Hero (the old Store Center logo tile is kept) */
+/* .panel stacks its children; the hero is a row like the old one. */
+.sh-hero { flex-direction: row; align-items: center; flex-wrap: wrap; }
+.sh-hero-text { flex: 1; min-width: 240px; }
+.sh-hero-text h2 { margin: 2px 0 10px; }
+.sh-hero-stores { display: flex; flex-wrap: wrap; gap: 6px; }
+.sh-hero-actions { display: flex; align-items: center; gap: 12px; }
+.sh-sync-meta { font-size: 12px; color: #8496ad; }
+.sh-refresh { display: inline-flex; align-items: center; gap: 6px; }
+.sh-refresh:active:not(:disabled) { transform: translateY(1px); }
+
+.sh-store-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
+  font: inherit;
+  font-size: 12px;
+  color: #c7d3e3;
+}
+.sh-store-tag small { font-size: 11px; color: #8496ad; }
+.sh-store-tag.is-add {
+  border-style: dashed;
+  background: transparent;
+  color: #8496ad;
+  cursor: pointer;
+  transition: color var(--anim-duration, 0.18s), border-color var(--anim-duration, 0.18s);
+}
+.sh-store-tag.is-add:hover { color: #dfe7f3; border-color: rgba(255, 255, 255, 0.22); }
+.sh-store-tag.is-add:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+
+.sh-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 11px 14px;
+  border-radius: var(--radius-md, 10px);
+  background: color-mix(in srgb, var(--status-warning) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-warning) 28%, transparent);
+  color: #f3d7a6;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.sh-banner svg { flex-shrink: 0; margin-top: 1px; }
+.sh-note { margin: -6px 2px 0; font-size: 12px; line-height: 1.5; color: #7a94b4; }
+.sh-note-inset { margin: 14px 0 0; }
+
+/* 2. Stat cards: as many equal columns as there are numbers */
+.sh-stats {
+  display: grid;
+  grid-template-columns: repeat(var(--sh-cols, 3), minmax(0, 1fr));
+  gap: 12px;
+}
+@container storehub (max-width: 760px) {
+  .sh-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.sh-stat .hero-stat-body { min-width: 0; }
+.sh-stat .hero-stat-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sh-stat-suffix { font-size: 15px; font-weight: 600; color: #8496ad; }
+.sh-change { display: inline-flex; align-items: center; gap: 3px; }
+
+/* Shared panel head with icon tile */
+.sh-panel-head { margin-bottom: 14px; }
+.sh-head-title { display: flex; align-items: center; gap: 12px; }
+.sh-head-title .eyebrow { margin: 0 0 2px; }
+.sh-head-title h3 { margin: 0; }
+
+/* 3. Compare | Highlights */
+.sh-duo {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.sh-duo.is-loading { grid-template-columns: 1fr; }
+/* The comparison sets the row height; the games panel fills the same
+   height and scrolls its list, so the two panels always line up. */
+.sh-games-slot { position: relative; min-height: 340px; }
+.sh-games-slot > .sh-games-panel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.sh-games-panel .sh-game-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-right: -6px;
+  padding-right: 6px;
+  scrollbar-width: thin;
+}
+.sh-duo.is-loading .sh-games-slot { min-height: 0; }
+.sh-duo.is-loading .sh-games-slot > .sh-games-panel { position: static; }
+@container storehub (max-width: 860px) {
+  .sh-duo { grid-template-columns: 1fr; }
+  .sh-games-slot { min-height: 0; }
+  .sh-games-slot > .sh-games-panel { position: static; }
+  .sh-games-panel .sh-game-list { overflow: visible; }
+}
+.sh-segment {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: calc(var(--radius-md, 10px) * 0.8);
+  background: rgba(255, 255, 255, 0.04);
+}
+.sh-segment button {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: calc(var(--radius-md, 10px) * 0.6);
+  background: transparent;
+  color: #9aabc1;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background var(--anim-duration, 0.18s), color var(--anim-duration, 0.18s);
+}
+.sh-segment button:hover { color: #dfe7f3; }
+.sh-segment button.is-active { background: var(--accent-soft); color: #f4f7fb; }
+.sh-segment button:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+.sh-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+
+.sh-bars { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sh-compare-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: auto;
+  padding: 14px 8px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 13px;
+  color: #9aabc1;
+}
+.sh-compare-total strong { font-size: 15px; color: #f4f7fb; }
+.sh-bars + .sh-compare-total { margin-top: auto; }
+.sh-compare .sh-bars { margin-bottom: 14px; }
+.sh-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: calc(var(--radius-md, 10px) * 0.8);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--anim-duration, 0.18s);
+}
+.sh-bar-row:hover:not(:disabled) { background: rgba(255, 255, 255, 0.03); }
+.sh-bar-row:disabled { cursor: default; }
+.sh-bar-row:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+.sh-rank {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 12px;
+  font-weight: 700;
+  color: #9aabc1;
+}
+.sh-rank.is-first { background: var(--accent-soft); color: #f4f7fb; }
+.sh-bar-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.sh-bar-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.sh-bar-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f4f7fb;
+}
+.sh-bar-stores { display: inline-flex; gap: 4px; }
+.sh-bar-value { display: inline-flex; align-items: baseline; gap: 8px; font-size: 13.5px; font-weight: 600; color: #f4f7fb; white-space: nowrap; }
+.sh-bar-value small { min-width: 44px; text-align: right; font-size: 12px; font-weight: 500; color: #8496ad; }
+.sh-bar-track { display: flex; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); overflow: hidden; }
+.sh-bar-track > span { display: block; height: 100%; border-radius: 4px; }
+
+/* 4. Trend */
+.sh-trend { padding-bottom: 12px; }
+
+/* 5. Games */
+.sh-game-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.sh-game-list li + li { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.sh-game {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 12px 6px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--anim-duration, 0.18s);
+}
+.sh-game:hover { background: rgba(255, 255, 255, 0.025); }
+.sh-game:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+.sh-game.is-loading { cursor: default; }
+.sh-game-cover {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #8496ad;
+  font-size: 19px;
+  font-weight: 700;
+}
+.sh-game-cover img { width: 100%; height: 100%; object-fit: cover; }
+.sh-game-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.sh-game-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.sh-game-title { font-size: 14.5px; font-weight: 600; color: #f4f7fb; }
+.sh-game-stores { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.sh-game-stats { display: flex; flex-wrap: wrap; gap: 6px 26px; }
+.sh-game-stat { display: flex; flex-direction: column; gap: 1px; }
+.sh-game-stat strong { font-size: 15.5px; font-weight: 600; color: #f4f7fb; }
+.sh-game-stat small { font-size: 11.5px; color: #8496ad; }
+.sh-rating { display: inline-flex; align-items: center; gap: 4px; color: #f2c46d !important; }
+.sh-game-error { display: inline-flex; align-items: flex-start; gap: 6px; font-size: 12.5px; line-height: 1.45; color: #f0a8a6; }
+.sh-game-error svg { flex-shrink: 0; margin-top: 2px; }
+.sh-game-chevron { flex-shrink: 0; color: #5f7088; }
+.sh-game:hover .sh-game-chevron { color: #9aabc1; }
+
+/* Nothing mapped yet */
+.sh-empty-steps { margin: 0 0 14px; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; color: #a9b8cc; line-height: 1.5; }
+.sh-empty-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sh-empty-actions .primary-button { display: inline-flex; align-items: center; gap: 6px; }
+
+/* v0.9.9 — Settings → Pomodoro "Lock app during break". Sits under the
+   privacy auto-lock (2000) so a privacy lock still wins. */
+.break-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 1900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(4, 8, 14, 0.9);
+  backdrop-filter: blur(16px);
+}
+.break-lock-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  width: min(420px, calc(100vw - 32px));
+  padding: 34px 40px 30px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, #131c2d, #0d1421);
+}
+.break-lock-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 14px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--status-success, #34d399) 16%, transparent);
+  color: var(--status-success, #34d399);
+}
+.break-lock-card .eyebrow { margin: 0 0 4px; }
+.break-lock-card h2 { margin: 0; font-size: 20px; color: #f4f7fb; }
+.break-lock-time {
+  margin: 14px 0 6px;
+  font-size: 56px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: #f4f7fb;
+}
+.break-lock-hint { margin: 0 0 22px; font-size: 13px; color: #94a3b8; }
+.break-lock-actions { display: flex; flex-direction: column; align-items: stretch; gap: 10px; width: 100%; }
+.break-lock-actions .secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.break-lock-skip {
+  position: relative;
+  overflow: hidden;
+  padding: 9px 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: transparent;
+  color: #8496ad;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+.break-lock-skip:hover { color: #dfe7f3; border-color: rgba(255, 255, 255, 0.28); }
+.break-lock-skip:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.break-lock-skip-fill {
+  position: absolute;
+  inset: 0;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: color-mix(in srgb, var(--status-warning, #f59e0b) 22%, transparent);
+}
+.break-lock-skip.is-holding .break-lock-skip-fill {
+  transform: scaleX(1);
+  transition: transform var(--hold-ms, 1500ms) linear;
+}
+.break-lock-skip-label { position: relative; }
+
+/* v0.9.9 — Settings → Storage tool results (inline under the row). */
+.setting-result {
+  margin: 2px 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #c7d3e3;
+}
+.setting-result.is-ok { border-color: color-mix(in srgb, var(--status-success) 30%, transparent); }
+.setting-result.is-warning { border-color: color-mix(in srgb, var(--status-warning) 35%, transparent); }
+.setting-result-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.setting-result-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.setting-result-list li { display: flex; justify-content: space-between; gap: 12px; min-width: 0; }
+.setting-result-list li > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting-result-list li > span:last-child { flex-shrink: 0; color: #8496ad; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting-result-list li.is-more { color: #8496ad; }
+.setting-result-list code { font-size: 11.5px; color: #a9b8cc; }
+.setting-result-list strong { font-weight: 600; color: #dfe7f3; }
+.setting-result-note { display: block; margin-top: 6px; font-size: 11.5px; color: #7a94b4; }
+.version-file-pruned { font-style: normal; color: #8496ad; }
+
+/* v0.9.9 — Settings → Import & Export */
+.setting-inline-pair { display: inline-flex; align-items: center; gap: 6px; }
+.ie-preview { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #c7d3e3; }
+.ie-preview-source { font-size: 11.5px; color: #8496ad; word-break: break-all; }
+.ie-preview ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.ie-preview li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ie-preview-more { font-size: 12px; color: #8496ad; }
+
+/* v0.9.9 — Settings → Webhooks → custom webhooks */
+.custom-webhook { display: flex; flex-direction: column; }
+.custom-webhook + .custom-webhook,
+.custom-webhook + .setting-row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.custom-webhook .setting-row-desc { word-break: break-all; }
+.custom-webhook-events { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 12px; }
+
+/* v0.9.9 — Experimental → custom dashboard widgets */
+.custom-widget-panel .dashboard-panel-body { min-height: 0; }
+.custom-widget-note { margin: 0; white-space: pre-wrap; line-height: 1.55; color: #dfe7f3; font-size: 13.5px; }
+.custom-widget-muted { margin: 0; color: #8496ad; font-size: 13px; }
+.custom-widget-countdown { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.custom-widget-countdown strong { font-size: 44px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; color: #f4f7fb; font-variant-numeric: tabular-nums; }
+.custom-widget-countdown span { font-size: 13px; color: #c7d3e3; }
+.custom-widget-countdown small { font-size: 12px; color: #8496ad; margin-top: 4px; }
+.custom-widget-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.custom-widget-links button {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px;
+  border: 0; border-radius: 8px; background: transparent; color: #dfe7f3;
+  font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.custom-widget-links button:hover { background: rgba(255, 255, 255, 0.04); }
+.custom-widget-links button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.custom-widget-editor { display: flex; flex-direction: column; gap: 10px; padding: 4px 0 14px; }
+.custom-widget-edit { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.05); }
+.custom-widget-edit-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.custom-widget-add { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ── Small windows (v0.9.9) ──────────────────────────────────────────────
+   HeraVex works from ~900px wide (two windows side by side on a 1920px
+   screen). Pages keep their desktop structure; only what doesn't fit
+   adapts. */
+
+/* Dashboard: the panel grid used to shrink to whatever height was left
+   (flex: 1 + min-height: 0), so on a short window its rows collapsed and
+   the panels drew over each other. It may grow but never shrink; the
+   page scrolls instead. */
+.dashboard-wrapper { flex: 1 0 auto; min-height: auto; }
+.dashboard-wrapper .dashboard-grid { flex: 1 0 auto; }
+
+/* Task inspector: its width is the user's (resizable, ~320px by
+   default), so adapt to the panel, not the window. */
+.task-detail-panel { container: taskdetail / inline-size; }
+@container taskdetail (max-width: 560px) {
+  .task-detail-header { flex-wrap: wrap; gap: 14px; }
+  .task-detail-header .task-detail-cover {
+    width: 72px;
+    height: 72px;
+    min-width: 72px;
+    border-radius: 16px;
+  }
+  .task-detail-header .task-detail-cover .cover-placeholder { font-size: 28px; border-radius: 16px; }
+  .task-detail-header > :not(.task-detail-cover) { flex: 1 1 160px; min-width: 0; }
+  .task-detail-header .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .task-detail-header .button-row > button { flex: 1 1 auto; width: auto; }
+}
+
+/* Recent-games rows: a game without a cover shows its initial in a tile
+   the same size as a cover thumbnail (it used to stretch across half the
+   row and squeeze the text). */
+.dashboard-game-row-left .cover-placeholder.mini {
+  flex: 0 0 54px;
+  width: 54px;
+  height: 54px;
+  min-height: 0;
+  border-radius: 14px;
+  font-size: 18px;
+}

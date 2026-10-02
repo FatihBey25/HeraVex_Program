@@ -33,7 +33,8 @@ export type ShortcutAction =
   // ── Actions (3)
   | "togglePomodoro"
   | "quickBackup"
-  | "switchGame";
+  | "switchGame"
+  | "newWindow";
 
 export type ShortcutDef = {
   action: ShortcutAction;
@@ -63,6 +64,7 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, ShortcutDef> = {
   togglePomodoro:     { action: "togglePomodoro",     combo: " ",       force: true  },
   quickBackup:        { action: "quickBackup",        combo: "shift+b", force: false },
   switchGame:         { action: "switchGame",         combo: "g",       force: false },
+  newWindow:          { action: "newWindow",          combo: "shift+o", force: false },
 };
 
 /** Logical groups for the Keyboard settings page. Used purely by the
@@ -78,7 +80,7 @@ export const SHORTCUT_GROUPS: { id: "navigation" | "create" | "actions"; ids: Sh
     ],
   },
   { id: "create",  ids: ["newGame", "newTask", "newNote"] },
-  { id: "actions", ids: ["togglePomodoro", "quickBackup", "switchGame"] },
+  { id: "actions", ids: ["togglePomodoro", "quickBackup", "switchGame", "newWindow"] },
 ];
 
 export function actionLabel(action: ShortcutAction, lang: AppLanguage): string {
@@ -100,6 +102,7 @@ export function actionLabel(action: ShortcutAction, lang: AppLanguage): string {
       togglePomodoro:     "Pomodoro başlat/durdur",
       quickBackup:        "Hızlı yedek",
       switchGame:         "Şu anki oyunu değiştir",
+      newWindow:          "Yeni pencere",
     },
     en: {
       openCommandPalette: "Open command palette",
@@ -118,6 +121,7 @@ export function actionLabel(action: ShortcutAction, lang: AppLanguage): string {
       togglePomodoro:     "Toggle Pomodoro",
       quickBackup:        "Quick backup",
       switchGame:         "Switch current game",
+      newWindow:          "New window",
     },
     fr: {
       openCommandPalette: "Ouvrir la palette de commandes",
@@ -136,6 +140,7 @@ export function actionLabel(action: ShortcutAction, lang: AppLanguage): string {
       togglePomodoro:     "Lancer / arrêter Pomodoro",
       quickBackup:        "Sauvegarde rapide",
       switchGame:         "Changer de jeu actif",
+      newWindow:          "Nouvelle fenêtre",
     },
     es: {
       openCommandPalette: "Abrir paleta de comandos",
@@ -154,6 +159,7 @@ export function actionLabel(action: ShortcutAction, lang: AppLanguage): string {
       togglePomodoro:     "Alternar Pomodoro",
       quickBackup:        "Copia rápida",
       switchGame:         "Cambiar juego activo",
+      newWindow:          "Nueva ventana",
     },
   };
   return tr[lang][action];

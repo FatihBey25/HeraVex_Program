@@ -33,6 +33,12 @@ export async function loadGames() {
   return invoke<GameRecord[]>("load_games");
 }
 
+/** Team sync: re-read only the given game files. Missing ids are absent
+ *  from the result. */
+export async function loadGamesByIds(ids: string[]) {
+  return invoke<GameRecord[]>("load_games_by_ids", { ids });
+}
+
 export async function createGame(input: CreateGameInput) {
   return invoke<GameRecord>("create_game", { input });
 }
@@ -55,17 +61,40 @@ export async function saveGame(game: GameRecord) {
   return saved;
 }
 
+/** `keepBuilds`: Settings → Storage auto-prune — keep this many newest
+ *  build files for the game (null = keep all). */
 export async function addVersionWithBuild(
   gameId: string,
   version: string,
-  notes: string
+  notes: string,
+  keepBuilds: number | null = null,
 ) {
   return invoke<GameRecord>("add_version_with_build", {
     gameId,
     version,
-    notes
+    notes,
+    keepBuilds,
   });
 }
+
+// ── Storage maintenance (Settings → Storage, v0.9.9) ───────────────────
+export type CleanResult = { files: number; bytes: number };
+export type OrphanImage = { path: string; relative: string; sizeBytes: number };
+export type IntegrityProblem = {
+  kind: "unreadable" | "corrupt" | "missingCover" | "missingImage" | "missingBuild" | "duplicateId" | "tempLeftover";
+  file: string;
+  detail: string;
+};
+export type IntegrityReport = { checkedFiles: number; problems: IntegrityProblem[] };
+export type PruneResult = { games: number; files: number; bytes: number };
+
+export const storageClearCache = () => invoke<CleanResult>("storage_clear_cache");
+export const storageRemoveTemp = () => invoke<CleanResult>("storage_remove_temp");
+export const storageFindOrphanImages = () => invoke<OrphanImage[]>("storage_find_orphan_images");
+export const storageDeleteOrphanImages = (paths: string[]) =>
+  invoke<CleanResult>("storage_delete_orphan_images", { paths });
+export const storageIntegrityCheck = () => invoke<IntegrityReport>("storage_integrity_check");
+export const storagePruneBuilds = (keep: number) => invoke<PruneResult>("storage_prune_builds", { keep });
 
 export async function openCurrentBuild(gameId: string) {
   return invoke<void>("open_current_build", { gameId });
@@ -93,6 +122,40 @@ export async function loadAppSettings() {
 
 export async function saveGlobalExpenses(expenses: ExpenseItem[]) {
   return invoke<void>("save_global_expenses", { expenses });
+}
+
+/** The active workspace's wallet (`<workspace>/wallet.json`, v0.9.9).
+ *  `legacyAvailable` = expenses from the pre-workspace wallet that this
+ *  workspace can still copy in; `migrated` = this load just adopted them. */
+export type WalletLoad = {
+  globalExpenses: ExpenseItem[];
+  activeCurrencies: string[] | null;
+  legacyAvailable: number;
+  migrated: boolean;
+};
+
+/** `claimLegacy`: may this workspace adopt the old wallet? False for team
+ *  folders so personal expenses never land in a shared folder. */
+export async function loadWallet(claimLegacy: boolean) {
+  return invoke<WalletLoad>("load_wallet", { claimLegacy });
+}
+
+/** Add or replace one general expense on disk; returns the saved list. */
+export async function walletUpsertExpense(expense: ExpenseItem) {
+  return invoke<ExpenseItem[]>("wallet_upsert_expense", { expense });
+}
+
+export async function walletDeleteExpense(expenseId: string) {
+  return invoke<ExpenseItem[]>("wallet_delete_expense", { expenseId });
+}
+
+export async function walletSetCurrencies(currencies: string[]) {
+  return invoke<void>("wallet_set_currencies", { currencies });
+}
+
+/** Copy the pre-workspace expenses into the active workspace. */
+export async function importLegacyWallet() {
+  return invoke<ExpenseItem[]>("import_legacy_wallet");
 }
 
 export async function saveExchangeRates(rates: Record<string, number>) {
@@ -223,6 +286,21 @@ export async function deleteBackup(path: string): Promise<void> {
   return invoke<void>("delete_backup", { path });
 }
 
+export type BackupVerifyReport = {
+  ok: boolean;
+  formatVersion: number;
+  games: number;
+  notes: number;
+  files: number;
+  hasWallet: boolean;
+  problems: string[];
+};
+
+/** Read a backup end to end (checksums, records, paths). Changes nothing. */
+export async function verifyBackup(path: string): Promise<BackupVerifyReport> {
+  return invoke<BackupVerifyReport>("verify_backup", { path });
+}
+
 /** v0.9 M7 — Destructive workspace wipe. Frontend MUST gate this
  *  behind a typed-confirmation prompt. The backend does no validation
  *  of the caller's intent. */
@@ -254,6 +332,38 @@ export async function openExternal(url: string) {
 
 export async function exportNotesPdf(gameId: string) {
   return invoke<string>("export_notes_pdf", { gameId });
+}
+
+// ── Import / export files (Settings → Import & Export, v0.9.9) ────────
+export type TextFileIn = { relative: string; contents: string; modifiedAt: string };
+
+/** Save dialog → writes `contents`. Returns the path. */
+export async function saveTextFileDialog(defaultName: string, filterName: string, extensions: string[], contents: string) {
+  return invoke<string>("save_text_file_dialog", { defaultName, filterName, extensions, contents });
+}
+
+/** Writes the files into a NEW folder inside `dir` (never overwrites). */
+export async function writeTextFilesToNewFolder(dir: string, folderName: string, files: { name: string; contents: string }[]) {
+  return invoke<string>("write_text_files_to_new_folder", { dir, folderName, files });
+}
+
+/** Pick a folder (or a .zip with `allowZip`) and read its text files. */
+export async function pickAndReadTextFiles(extensions: string[], allowZip = false, title?: string) {
+  return invoke<[string, TextFileIn[]]>("pick_and_read_text_files", { extensions, allowZip, title: title ?? null });
+}
+
+export async function pickAndReadTextFile(filterName: string, extensions: string[]) {
+  return invoke<TextFileIn>("pick_and_read_text_file", { filterName, extensions });
+}
+
+/** One game + its images as `<title>.heravex-game.zip` (save dialog). */
+export async function exportGameBundle(gameId: string) {
+  return invoke<string>("export_game_bundle", { gameId });
+}
+
+/** Add a game from a `.heravex-game.zip` as a NEW game. */
+export async function importGameBundle() {
+  return invoke<GameRecord>("import_game_bundle");
 }
 
 export async function getAllNotes() {
@@ -309,16 +419,33 @@ export async function generatePressKit(
 
 // ── Workspace / Cloud Sync ─────────────────────────────────────────────
 
+// Last known workspace root, kept in sync by every get/set/clear below.
+// Synchronous readers (image path remapping in lib/images.ts) use it to
+// re-anchor teammate-written absolute paths without an IPC round trip.
+let cachedWorkspacePath: string | null = null;
+
+/** Synchronous snapshot of the workspace root (null = default local
+ *  data dir, or not fetched yet). Refreshed by `getWorkspacePath()`,
+ *  which team sync calls every poll tick. */
+export function getCachedWorkspacePath(): string | null {
+  return cachedWorkspacePath;
+}
+
 export async function getWorkspacePath() {
-  return invoke<string | null>("get_workspace_path");
+  const p = await invoke<string | null>("get_workspace_path");
+  cachedWorkspacePath = p && p.trim() ? p : null;
+  return p;
 }
 
 export async function setWorkspacePath(newPath: string) {
-  return invoke<string>("set_workspace_path", { newPath });
+  const saved = await invoke<string>("set_workspace_path", { newPath });
+  cachedWorkspacePath = saved || newPath;
+  return saved;
 }
 
 export async function clearWorkspacePath() {
-  return invoke<void>("clear_workspace_path");
+  await invoke<void>("clear_workspace_path");
+  cachedWorkspacePath = null;
 }
 
 export async function readActivityLog() {
@@ -335,6 +462,16 @@ export async function pickDirectory() {
 
 export async function pickGooglePlayJson() {
   return invoke<string>("pick_google_play_json");
+}
+
+/** Settings → Studio logo: pick an image, copy it into app data.
+ *  `previous` (our own copy) is deleted. Returns the new path. */
+export async function pickAndSaveStudioLogo(previous: string) {
+  return invoke<string>("pick_and_save_studio_logo", { previous: previous || null });
+}
+
+export async function clearStudioLogo(path: string) {
+  return invoke<void>("clear_studio_logo", { path });
 }
 
 export async function clearAvatar() {

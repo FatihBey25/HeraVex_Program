@@ -51,6 +51,15 @@ export function Profile({ onOpenLanguage: _onOpenLanguage }: { onOpenLanguage: (
   useEffect(() => {
     try { localStorage.setItem(LAST_SECTION_KEY, activeSection); } catch { /* quota */ }
   }, [activeSection]);
+  // A settings page can send the user to another section.
+  useEffect(() => {
+    const go = (e: Event) => {
+      const s = (e as CustomEvent<SettingsSection>).detail;
+      if ((SETTINGS_FLAT_ORDER as string[]).includes(s)) setActiveSection(s);
+    };
+    window.addEventListener("heravex:settings-go", go);
+    return () => window.removeEventListener("heravex:settings-go", go);
+  }, []);
 
   return (
     <motion.div

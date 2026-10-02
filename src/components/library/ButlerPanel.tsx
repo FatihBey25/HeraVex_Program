@@ -25,6 +25,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAppStore } from "../../store";
 import { pickDirectory } from "../../lib/storage";
 import type { GameRecord } from "../../types";
+import { emitWebhookEvent } from "../../lib/webhookEvents";
 
 type ButlerLog =
   | { kind: "stdout"; line: string }
@@ -157,6 +158,11 @@ export const ButlerPanel = forwardRef<ButlerPanelHandle, Props>(function ButlerP
         target: butlerTarget.trim(),
       });
       showToast(tr("Build pushed to Itch.io.", "Build Itch.io'ya gönderildi."), "success");
+      void emitWebhookEvent("buildReady", {
+        game: game.title,
+        version: game.versions[0]?.version,
+        user: useAppStore.getState().profile.displayName,
+      });
     } catch (err) {
       const msg = String(err);
       if (!msg.includes("butler bulunamadi")) {

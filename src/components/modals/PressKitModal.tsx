@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { Megaphone, FolderOpen, X, Plus, Trash2, Loader2, Eye } from "lucide-react";
 import { useAppStore } from "../../store";
 import { generatePressKit, pickDirectory, revealInFolder } from "../../lib/storage";
+import { emitWebhookEvent } from "../../lib/webhookEvents";
 import type { GameRecord, PressKitInput, PressKitTemplateId, CustomLink } from "../../types";
 
 export function PressKitModal({
@@ -12,7 +13,7 @@ export function PressKitModal({
   game: GameRecord;
   onClose: () => void;
 }) {
-  const { language, showToast, showError } = useAppStore();
+  const { language, showToast, showError, studioIdentity } = useAppStore();
   const tr = (en: string, t: string) => (language === "tr" ? t : en);
 
   const defaultInput = useMemo<PressKitInput>(
@@ -20,17 +21,19 @@ export function PressKitModal({
       description: game.summary ?? "",
       features: [],
       history: "",
-      developer: "HeraVex",
+      // Settings → Studio fills the studio fields.
+      developer: studioIdentity.studioName.trim() || "HeraVex",
       releaseDate: game.status,
       website: "",
-      pressContact: "",
+      pressContact: studioIdentity.pressEmail.trim() || studioIdentity.contactEmail.trim(),
       pricing: "",
       languages: "English",
       socialLinks: [],
       templateId: "classic",
       darkMode: false,
+      studioLogoPath: studioIdentity.logoPath,
     }),
-    [game]
+    [game, studioIdentity]
   );
 
   const TEMPLATES: { id: PressKitTemplateId; label: { en: string; tr: string }; desc: { en: string; tr: string } }[] = [
@@ -158,6 +161,7 @@ export function PressKitModal({
     try {
       const dir = await pickDirectory();
       const kitPath = await generatePressKit(game.id, dir, input);
+      void emitWebhookEvent("pressKitGenerated", { game: game.title, user: useAppStore.getState().profile.displayName });
       showToast(
         tr(`Press kit ready: ${kitPath}`, `Basın kiti hazırlandı: ${kitPath}`),
         "success",

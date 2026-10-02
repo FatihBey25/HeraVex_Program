@@ -35,11 +35,14 @@ import { imgSrc } from "../../../lib/images";
 import { APP_VERSION, APP_BUILD_DATE, RELEASES_URL, FEEDBACK_EMAIL } from "../../../lib/app-meta";
 import {
   openExternal, revealInFolder, getWorkspacePath, setWorkspacePath, clearWorkspacePath,
-  pickDirectory, pickGooglePlayJson, fetchStoreGames,
-  computeStorageStats, listBackups, deleteBackup,
-  type StorageStats, type BackupEntry,
+  pickDirectory, pickGooglePlayJson, fetchStoreGames, pickAndSaveStudioLogo, clearStudioLogo,
+  computeStorageStats, listBackups, deleteBackup, verifyBackup, type BackupVerifyReport,
+  storageClearCache, storageRemoveTemp, storageFindOrphanImages, storageDeleteOrphanImages,
+  storageIntegrityCheck, storagePruneBuilds,
+  type StorageStats, type BackupEntry, type OrphanImage, type IntegrityReport, type CleanResult,
 } from "../../../lib/storage";
-import { postDiscordWebhook, type WebhookEvent } from "../../../lib/teamWebhooks";
+import { postDiscordWebhook, type CustomWebhook, type WebhookEvent } from "../../../lib/teamWebhooks";
+import { customPayload, postCustomWebhook } from "../../../lib/webhookEvents";
 import {
   signOutAndReload, safeCopyToClipboard,
   type AutoLockTimeout, type ClipboardClearSeconds, type ReleaseChannel,
@@ -56,15 +59,13 @@ import {
 } from "../../../lib/shortcutConfig";
 import { useCallback, useEffect, useState } from "react";
 import { PluginsPage } from "./PluginsPage";
+import { ImportExportPage } from "./ImportExportPage";
+import type { CustomWidget } from "../../../lib/privacyExperimental";
+import { SYNC_INTERVAL_OPTIONS, loadStoreSyncPrefs, saveStoreSyncPrefs, type StoreSyncPrefs } from "../../../lib/storeSync";
+import type { StoreProvider } from "../../../types";
+import { ConfirmDialog } from "../../shared/ConfirmDialog";
+import { listPluginThemes, getActivePluginThemeKey, applyPluginTheme } from "../../../lib/pluginThemes";
 import type { SettingsSection } from "./sections";
-
-/** A throwaway "this control will be wired up later" chip. Sits in
- *  the SettingRow control slot so the row's right edge looks
- *  identical to a real future control. */
-function ComingChip() {
-  const { ui } = useAppStore();
-  return <span className="setting-row-soon-chip">{ui.settingsRowComingSoon}</span>;
-}
 
 /** Top-level dispatcher — each section maps to a renderer. */
 export function SettingsPage({ section }: { section: SettingsSection }) {
@@ -289,8 +290,22 @@ function ProfilePage() {
 }
 
 function StudioPage() {
-  const { ui, studioIdentity, setStudioIdentity } = useAppStore();
+  const { ui, studioIdentity, setStudioIdentity, showToast, language } = useAppStore();
   const s = studioIdentity;
+  const logoSrc = imgSrc(s.logoPath);
+  const pickLogo = async () => {
+    try {
+      const path = await pickAndSaveStudioLogo(s.logoPath);
+      setStudioIdentity({ logoPath: path });
+    } catch (err) {
+      if (!String(err).includes("iptal")) showToast(String(err), "error");
+    }
+  };
+  const removeLogo = async () => {
+    const prev = s.logoPath;
+    setStudioIdentity({ logoPath: "" });
+    await clearStudioLogo(prev).catch(() => null);
+  };
   return (
     <>
       <SettingGroup label={ui.studioGroupStudio}>
@@ -301,10 +316,28 @@ function StudioPage() {
         />
         <SettingRow
           title={ui.studioLogo}
-          description={ui.studioLogoDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={language === "tr"
+            ? "Kare görsel. Ana sayfadaki stüdyo kartında ve press kit'te geliştirici adının yanında görünür."
+            : "Square image. Shown on the Dashboard studio card and next to the developer name in press kits."}
+          control={
+            <div className="setting-avatar-control">
+              {logoSrc ? (
+                <img src={logoSrc} alt="" className="setting-avatar-preview setting-logo-preview" />
+              ) : (
+                <div className="setting-avatar-placeholder setting-logo-preview">
+                  <Camera size={16} />
+                </div>
+              )}
+              <CompactButton onClick={() => void pickLogo()}>
+                {language === "tr" ? "Seç" : "Choose"}
+              </CompactButton>
+              {logoSrc && (
+                <CompactButton onClick={() => void removeLogo()} variant="danger">
+                  <Trash2 size={11} />
+                </CompactButton>
+              )}
+            </div>
+          }
         />
         <SettingRow
           title={ui.studioFounded}
@@ -564,7 +597,17 @@ function ThemePreviewGrid({
   activeSidebar: string;
   onPick: (mainId: string, sidebarId: string) => void;
 }) {
-  const { ui, language } = useAppStore();
+  const { language } = useAppStore();
+  // Plugin-registered themes appear right here alongside the built-ins —
+  // they are BACKGROUND themes now (sidebar + main), not a light/dark
+  // "mode". The core owns apply/persist/revert via pluginThemes.
+  const [pluginThemes, setPluginThemes] = useState(() => listPluginThemes());
+  const [activePlugin, setActivePlugin] = useState<string | null>(() => getActivePluginThemeKey());
+  useEffect(() => {
+    const on = () => { setPluginThemes(listPluginThemes()); setActivePlugin(getActivePluginThemeKey()); };
+    window.addEventListener("heravex:plugin-themes-changed", on);
+    return () => window.removeEventListener("heravex:plugin-themes-changed", on);
+  }, []);
   const presets: { id: string; label: string; main: string; sidebar: string }[] = [
     { id: "standard",  label: language === "tr" ? "Klasik"     : "Classic",   main: "standard",  sidebar: "dark" },
     { id: "pureBlack", label: language === "tr" ? "Tam Siyah"  : "Pure Black",main: "pureBlack", sidebar: "darker" },
@@ -580,17 +623,17 @@ function ThemePreviewGrid({
     <div className="setting-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
       <div className="setting-row-text" style={{ marginBottom: 6 }}>
         <span className="setting-row-title">{language === "tr" ? "Hızlı tema seçimi" : "Quick theme picker"}</span>
-        <span className="setting-row-desc">{language === "tr" ? "Side bar + arkaplanı tek tıkla eşleştir." : "Pair sidebar + background in one click."}</span>
+        <span className="setting-row-desc">{language === "tr" ? "Sidebar + arkaplanı tek tıkla eşleştir. Eklenti temaları da burada." : "Pair sidebar + background in one click. Plugin themes appear here too."}</span>
       </div>
       <div className="theme-preview-grid">
         {presets.map((p) => {
-          const isActive = activeMain === p.main && activeSidebar === p.sidebar;
+          const isActive = !activePlugin && activeMain === p.main && activeSidebar === p.sidebar;
           return (
             <button
               key={p.id}
               type="button"
               className={`theme-preview-card theme-preview-${p.main}${isActive ? " is-active" : ""}`}
-              onClick={() => onPick(p.main, p.sidebar)}
+              onClick={() => { applyPluginTheme(null); onPick(p.main, p.sidebar); }}
               title={p.label}
               aria-pressed={isActive}
             >
@@ -611,8 +654,40 @@ function ThemePreviewGrid({
             </button>
           );
         })}
+        {/* Plugin themes — same preview-card language, colours come from
+            the plugin's declared preview swatches (inline, since there's
+            no per-theme CSS class). */}
+        {pluginThemes.map((pt) => {
+          const isActive = activePlugin === pt.key;
+          const bg = pt.preview ?? "#1a1a2e";
+          const acc = pt.previewAccent ?? "#7aa0ff";
+          return (
+            <button
+              key={pt.key}
+              type="button"
+              className={`theme-preview-card theme-preview-plugin${isActive ? " is-active" : ""}`}
+              onClick={() => applyPluginTheme(pt.key)}
+              title={`${pt.label} · ${pt.pluginName}`}
+              aria-pressed={isActive}
+            >
+              <div className="theme-preview-shell" style={{ background: bg }}>
+                <div className="theme-preview-sidebar" style={{ background: "rgba(0,0,0,0.35)" }}>
+                  <span className="theme-preview-brand" style={{ background: acc }} />
+                  <span className="theme-preview-nav" />
+                  <span className="theme-preview-nav" />
+                  <span className="theme-preview-nav theme-preview-nav-active" style={{ background: acc }} />
+                </div>
+                <div className="theme-preview-main">
+                  <span className="theme-preview-card-pill" />
+                  <span className="theme-preview-card-pill" />
+                  <span className="theme-preview-cta" style={{ background: acc }} />
+                </div>
+              </div>
+              <span className="theme-preview-label">🧩 {pt.label}</span>
+            </button>
+          );
+        })}
       </div>
-      <span style={{ fontSize: 11, color: "#94a3b8" }}>{ui.themeAccentTargetSidebar /* "Apply to sidebar" — reused tag */}</span>
     </div>
   );
 }
@@ -627,30 +702,10 @@ function ThemePage() {
   // page.
   return (
     <>
-      <SettingGroup label={ui.themeGroupMode}>
-        <SettingRow
-          title={ui.themeMode}
-          description={ui.themeModeDesc}
-          control={
-            <PillGroup
-              value={a.theme}
-              options={[
-                { id: "system", label: ui.themeModeSystem },
-                { id: "dark",   label: ui.themeModeDark },
-              ]}
-              onChange={(id) => setAppearance({ theme: id })}
-            />
-          }
-        />
-        <SettingRow
-          title={ui.themeModeLight}
-          description={ui.themeModeLightDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-      </SettingGroup>
-
+      {/* Theme "mode" (System / Dark / Light) was removed in v0.9.9 —
+          HeraVex themes the app through BACKGROUND themes (the quick-theme
+          picker below), not a light/dark toggle. Plugin themes live in
+          that same picker. */}
       <SettingGroup label={ui.themeGroupAccent}>
         <SettingRow
           title={ui.themeAccentColor}
@@ -765,10 +820,20 @@ function ThemePage() {
           accent={a.accentColor}
           activeMain={a.bgMain}
           activeSidebar={a.bgSidebar}
-          onPick={(mainId, sidebarId) => setAppearance({
-            bgMain: mainId as typeof a.bgMain,
-            bgSidebar: sidebarId as typeof a.bgSidebar,
-          })}
+          onPick={(mainId, sidebarId) => {
+            // Quick themes now also set a matching Flow Center canvas tint
+            // so the flow background follows the picked theme.
+            const flowByPreset: Record<string, string> = {
+              midnight: "#4f8cff", ocean: "#22d3ee", plum: "#a78bfa",
+              forest: "#34d399", slate: "#7d96c8", sunset: "#f59e0b",
+              gradient: "#a78bfa", pureBlack: "#64748b", standard: "#4f8cff",
+            };
+            setAppearance({
+              bgMain: mainId as typeof a.bgMain,
+              bgSidebar: sidebarId as typeof a.bgSidebar,
+              flowBgColor: flowByPreset[mainId] ?? a.flowBgColor,
+            });
+          }}
         />
       </SettingGroup>
 
@@ -802,20 +867,7 @@ function ThemePage() {
           title={trc("Background color", "Arka plan rengi")}
           control={
             <AccentSwatchGrid
-              presets={[
-                { id: "blue",    value: "#4f8cff", label: "Blue" },
-                { id: "indigo",  value: "#6366f1", label: "Indigo" },
-                { id: "violet",  value: "#a855f7", label: "Violet" },
-                { id: "pink",    value: "#ec4899", label: "Pink" },
-                { id: "rose",    value: "#f87171", label: "Rose" },
-                { id: "sunset",  value: "#f59e0b", label: "Sunset" },
-                { id: "amber",   value: "#fbbf24", label: "Amber" },
-                { id: "forest",  value: "#22c55e", label: "Forest" },
-                { id: "emerald", value: "#10b981", label: "Emerald" },
-                { id: "ocean",   value: "#22d3ee", label: "Ocean" },
-                { id: "slate",   value: "#7d96c8", label: "Slate" },
-                { id: "gray",    value: "#64748b", label: "Gray" },
-              ]}
+              presets={ACCENT_PRESETS.map((p) => ({ id: p.id, value: p.value, label: ui[p.labelKey] }))}
               current={a.flowBgColor === "auto" ? "" : (a.flowBgColor ?? "")}
               onChange={(next) => setAppearance({ flowBgColor: next })}
             />
@@ -1088,9 +1140,10 @@ function LayoutPage() {
         />
         <SettingRow
           title={ui.layoutSidebarCollapseHover}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={language === "tr"
+            ? "Kenar çubuğu yalnızca simgelerle durur, sayfalara daha fazla yer kalır. Üstteki düğmeyle açılır. Pencere daraldığında bu otomatik olur."
+            : "The sidebar stays as icons, giving pages more room. Open it with the button at the top. Narrow windows do this automatically."}
+          control={<Toggle checked={l.sidebarCollapseOnHover === true} onChange={(v) => setLayout({ sidebarCollapseOnHover: v })} />}
         />
       </SettingGroup>
 
@@ -1339,20 +1392,6 @@ function GeneralPage() {
           }
         />
         <SettingRow
-          title={ui.generalWeekStart}
-          control={
-            <PillGroup
-              value={g.weekStart}
-              options={[
-                { id: "monday",   label: ui.generalWeekMon },
-                { id: "saturday", label: ui.generalWeekSat },
-                { id: "sunday",   label: ui.generalWeekSun },
-              ]}
-              onChange={(id) => setGeneral({ weekStart: id as typeof g.weekStart })}
-            />
-          }
-        />
-        <SettingRow
           title={ui.generalNumberFormat}
           control={
             <PillGroup
@@ -1424,8 +1463,9 @@ function GeneralPage() {
 }
 
 function StartupPage() {
-  const { ui, startup, setStartup } = useAppStore();
+  const { ui, startup, setStartup, general, setGeneral, language } = useAppStore();
   const s = startup;
+  const trT = (en: string, tr: string) => (language === "tr" ? tr : en);
   // Use the existing top-level i18n keys for page labels — saves us a
   // dozen extra translation entries since these names are already
   // localised on the main sidebar.
@@ -1482,22 +1522,38 @@ function StartupPage() {
         />
         <SettingRow
           title={ui.startupMinimiseTray}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={trT(
+            "Minimising hides HeraVex to the tray icon (bottom-right) instead of the taskbar. Click the icon to bring it back.",
+            "Küçültünce HeraVex görev çubuğu yerine sağ alttaki simge alanına gizlenir. Geri açmak için simgeye tıkla.",
+          )}
+          control={<Toggle checked={s.minimiseToTray} onChange={(v) => setStartup({ minimiseToTray: v })} />}
         />
         <SettingRow
           title={ui.startupCloseTray}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={trT(
+            "Closing the window keeps HeraVex running in the tray. Team sync and Pomodoro keep going. Right-click the tray icon and choose Quit to exit.",
+            "Pencereyi kapatınca HeraVex sağ alttaki simge alanında çalışmaya devam eder. Ekip eşitlemesi ve Pomodoro durmaz. Tamamen kapatmak için simgeye sağ tıklayıp Çıkış'ı seç.",
+          )}
+          control={<Toggle checked={general.closeToTray !== false} onChange={(v) => setGeneral({ closeToTray: v })} />}
         />
         <SettingRow
           title={ui.startupMultiWindow}
-          description={ui.startupMultiWindowDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={trT(
+            "Open more HeraVex windows (Ctrl+Shift+O), e.g. notes on one screen and tasks on the other. A save in one window shows up in the others.",
+            "Birden fazla HeraVex penceresi aç (Ctrl+Shift+O), örneğin bir ekranda notlar diğerinde görevler. Bir pencerede kaydedilen diğerlerinde de görünür.",
+          )}
+          control={
+            <div className="setting-inline-pair">
+              {s.multiWindow && (
+                <CompactButton
+                  onClick={() => void invoke("open_app_window", { tab: null }).catch((err) => useAppStore.getState().showError(err))}
+                >
+                  {trT("New window", "Yeni pencere")}
+                </CompactButton>
+              )}
+              <Toggle checked={s.multiWindow} onChange={(v) => setStartup({ multiWindow: v })} />
+            </div>
+          }
         />
       </SettingGroup>
 
@@ -1623,7 +1679,7 @@ function KeyboardPage() {
 }
 
 function PomodoroPage() {
-  const { ui, pomodoroPrefs, setPomodoroPrefs } = useAppStore();
+  const { ui, pomodoroPrefs, setPomodoroPrefs, language } = useAppStore();
   const p = pomodoroPrefs;
   return (
     <>
@@ -1686,9 +1742,10 @@ function PomodoroPage() {
         />
         <SettingRow
           title={ui.pomoLockApp}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={language === "tr"
+            ? "Mola başlayınca uygulamanın üstüne geri sayım gelir ve mola bitene kadar kullanılamaz. Acil durumda \"Molayı atla\" düğmesini basılı tutabilirsin."
+            : "When a break starts, a countdown covers the app until the break is over. In an emergency, hold \"Skip break\"."}
+          control={<Toggle checked={p.lockAppDuringBreak} onChange={(v) => setPomodoroPrefs({ lockAppDuringBreak: v })} />}
         />
       </SettingGroup>
 
@@ -1745,7 +1802,11 @@ function PomodoroPage() {
 // ─────────────────────────────────────────────────────────────────────
 
 function StoragePage() {
-  const { ui, language, showError, showToast, refreshGames } = useAppStore();
+  const { ui, language, showError, showToast, refreshGames, backupPrefs, setBackupPrefs } = useAppStore();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [orphans, setOrphans] = useState<OrphanImage[] | null>(null);
+  const [confirmOrphans, setConfirmOrphans] = useState(false);
+  const [integrity, setIntegrity] = useState<IntegrityReport | null>(null);
   const [stats, setStats] = useState<StorageStats | null>(null);
   const [workspacePath, setWorkspacePathState] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -1794,6 +1855,62 @@ function StoragePage() {
       setMoving(false);
     }
   };
+
+  // ── Maintenance tools ──────────────────────────────────────────────
+  const cleanedText = (r: CleanResult) =>
+    r.files === 0
+      ? tr("Nothing to clean.", "Temizlenecek bir şey yok.")
+      : tr(`Removed ${r.files} file(s), ${formatBytes(r.bytes)} freed.`, `${r.files} dosya silindi, ${formatBytes(r.bytes)} yer açıldı.`);
+  const runTool = async (id: string, fn: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(id);
+    try { await fn(); } catch (err) { showError(err); } finally { setBusy(null); }
+  };
+  const clearCache = () => runTool("cache", async () => {
+    const r = await storageClearCache();
+    showToast(cleanedText(r), r.files ? "success" : "info");
+    void reload();
+  });
+  const removeTemp = () => runTool("temp", async () => {
+    const r = await storageRemoveTemp();
+    showToast(cleanedText(r), r.files ? "success" : "info");
+    void reload();
+  });
+  const scanOrphans = () => runTool("orphans", async () => {
+    setOrphans(await storageFindOrphanImages());
+  });
+  const deleteOrphans = () => runTool("orphans", async () => {
+    setConfirmOrphans(false);
+    const r = await storageDeleteOrphanImages((orphans ?? []).map((o) => o.path));
+    showToast(cleanedText(r), r.files ? "success" : "info");
+    setOrphans(await storageFindOrphanImages());
+    void reload();
+  });
+  const checkIntegrity = () => runTool("integrity", async () => {
+    setIntegrity(await storageIntegrityCheck());
+  });
+  const pruneNow = () => runTool("prune", async () => {
+    const r = await storagePruneBuilds(Math.max(1, backupPrefs.buildsToKeep || 5));
+    showToast(
+      r.files === 0
+        ? tr("No old build files to remove.", "Silinecek eski build dosyası yok.")
+        : tr(`Removed old builds from ${r.games} game(s), ${formatBytes(r.bytes)} freed.`,
+             `${r.games} oyunun eski build dosyaları silindi, ${formatBytes(r.bytes)} yer açıldı.`),
+      r.files ? "success" : "info",
+    );
+    await refreshGames();
+    void reload();
+  });
+  const problemLabel: Record<string, [string, string]> = {
+    unreadable:   ["Can't be read", "Okunamıyor"],
+    corrupt:      ["Damaged file", "Bozuk dosya"],
+    missingCover: ["Cover image missing", "Kapak görseli eksik"],
+    missingImage: ["Moodboard image missing", "Moodboard görseli eksik"],
+    missingBuild: ["Build file missing", "Build dosyası eksik"],
+    duplicateId:  ["Same id twice", "Aynı kimlik iki kez"],
+    tempLeftover: ["Leftover temporary files", "Artık geçici dosya"],
+  };
+  const orphanBytes = (orphans ?? []).reduce((a, o) => a + o.sizeBytes, 0);
 
   const resetDataFolder = async () => {
     setMoving(true);
@@ -1857,16 +1974,137 @@ function StoragePage() {
       </SettingGroup>
 
       <SettingGroup label={ui.storageGroupMaintenance}>
-        <SettingRow title={ui.storageClearCache}        badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.storageRemoveTemp}        badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.storageOrphanMoodboard}   badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.storageIntegrityCheck}    badge="v1.0" disabled control={<ComingChip />} />
+        <SettingRow
+          title={ui.storageClearCache}
+          description={tr(
+            "Store Center's saved copy of store numbers. Fresh numbers are downloaded on the next refresh.",
+            "Mağaza Merkezi'nin kaydettiği mağaza verileri. Bir sonraki yenilemede yeniden indirilir.",
+          )}
+          control={<CompactButton onClick={() => void clearCache()} disabled={!!busy}>{busy === "cache" ? "…" : tr("Clear", "Temizle")}</CompactButton>}
+        />
+        <SettingRow
+          title={ui.storageRemoveTemp}
+          description={tr(
+            "Half-written files left by an interrupted save or backup. Files from the last 10 minutes are kept.",
+            "Yarıda kalan kayıt veya yedeklerden kalan dosyalar. Son 10 dakikadakiler korunur.",
+          )}
+          control={<CompactButton onClick={() => void removeTemp()} disabled={!!busy}>{busy === "temp" ? "…" : tr("Remove", "Sil")}</CompactButton>}
+        />
+        <SettingRow
+          title={ui.storageOrphanMoodboard}
+          description={tr(
+            "Cover and moodboard images no game, note or flow uses any more. You see the list before anything is deleted.",
+            "Hiçbir oyun, not veya akışın artık kullanmadığı kapak ve moodboard görselleri. Silmeden önce listeyi görürsün.",
+          )}
+          control={<CompactButton onClick={() => void scanOrphans()} disabled={!!busy}>{busy === "orphans" ? "…" : tr("Scan", "Tara")}</CompactButton>}
+        />
+        {orphans && (
+          <div className="setting-result" role="status">
+            {orphans.length === 0 ? (
+              <span>{tr("No unused images found.", "Kullanılmayan görsel bulunmadı.")}</span>
+            ) : (
+              <>
+                <div className="setting-result-head">
+                  <span>
+                    {tr(`${orphans.length} unused image(s), ${formatBytes(orphanBytes)}`,
+                        `${orphans.length} kullanılmayan görsel, ${formatBytes(orphanBytes)}`)}
+                  </span>
+                  <CompactButton variant="danger" onClick={() => setConfirmOrphans(true)} disabled={!!busy}>
+                    {tr("Delete all", "Hepsini sil")}
+                  </CompactButton>
+                </div>
+                <ul className="setting-result-list">
+                  {orphans.slice(0, 8).map((o) => (
+                    <li key={o.path}><code>{o.relative}</code><span>{formatBytes(o.sizeBytes)}</span></li>
+                  ))}
+                  {orphans.length > 8 && <li className="is-more">{tr(`+${orphans.length - 8} more`, `+${orphans.length - 8} tane daha`)}</li>}
+                </ul>
+                <span className="setting-result-note">
+                  {tr("Images changed in the last 24 hours are never listed (a teammate's sync may still be arriving).",
+                      "Son 24 saatte değişen görseller listelenmez (takım arkadaşının eşitlemesi hâlâ geliyor olabilir).")}
+                </span>
+              </>
+            )}
+          </div>
+        )}
+        <SettingRow
+          title={ui.storageIntegrityCheck}
+          description={tr(
+            "Reads every record and checks that the images and builds they point to exist. Changes nothing.",
+            "Tüm kayıtları okur, işaret ettikleri görsel ve build dosyalarının yerinde olup olmadığına bakar. Hiçbir şeyi değiştirmez.",
+          )}
+          control={<CompactButton onClick={() => void checkIntegrity()} disabled={!!busy}>{busy === "integrity" ? "…" : tr("Check", "Kontrol et")}</CompactButton>}
+        />
+        {integrity && (
+          <div className={"setting-result" + (integrity.problems.length ? " is-warning" : " is-ok")} role="status">
+            {integrity.problems.length === 0 ? (
+              <span>{tr(`${integrity.checkedFiles} records checked. No problems found.`,
+                        `${integrity.checkedFiles} kayıt kontrol edildi. Sorun bulunmadı.`)}</span>
+            ) : (
+              <>
+                <div className="setting-result-head">
+                  <span>{tr(`${integrity.checkedFiles} records checked, ${integrity.problems.length} problem(s):`,
+                            `${integrity.checkedFiles} kayıt kontrol edildi, ${integrity.problems.length} sorun:`)}</span>
+                </div>
+                <ul className="setting-result-list">
+                  {integrity.problems.slice(0, 20).map((p, i) => (
+                    <li key={i}>
+                      <strong>{tr(...problemLabel[p.kind] ?? [p.kind, p.kind])}</strong>
+                      <span>
+                        {p.kind === "tempLeftover"
+                          ? tr(`${p.detail} file(s) — use "Remove temporary files" above`, `${p.detail} dosya — yukarıdaki "Geçici dosyaları sil" ile temizlenir`)
+                          : [p.file, p.detail].filter(Boolean).join(" — ")}
+                      </span>
+                    </li>
+                  ))}
+                  {integrity.problems.length > 20 && <li className="is-more">{tr(`+${integrity.problems.length - 20} more`, `+${integrity.problems.length - 20} tane daha`)}</li>}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
       </SettingGroup>
 
       <SettingGroup label={ui.storageGroupAutoMaintenance}>
-        <SettingRow title={ui.storageAutoPrune}     badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.storageVersionsKeep}  badge="v1.0" disabled control={<ComingChip />} />
+        <SettingRow
+          title={ui.storageAutoPrune}
+          description={tr(
+            "When you add a version, build files of older versions are deleted. The version entries and notes stay; the current build is never removed. In a team folder this affects everyone.",
+            "Yeni sürüm eklediğinde eski sürümlerin build dosyaları silinir. Sürüm kayıtları ve notları kalır, aktif build asla silinmez. Takım klasöründe herkesi etkiler.",
+          )}
+          control={<Toggle checked={backupPrefs.autoPruneBuilds} onChange={(v) => setBackupPrefs({ autoPruneBuilds: v })} />}
+        />
+        <SettingRow
+          title={ui.storageVersionsKeep}
+          description={tr("Newest builds kept per game.", "Her oyun için tutulacak en yeni build sayısı.")}
+          control={
+            <div style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+              <SliderRow
+                value={backupPrefs.buildsToKeep || 5}
+                min={1}
+                max={20}
+                onChange={(v) => setBackupPrefs({ buildsToKeep: v })}
+              />
+              <CompactButton onClick={() => void pruneNow()} disabled={!!busy}>
+                {busy === "prune" ? "…" : tr("Clean now", "Şimdi temizle")}
+              </CompactButton>
+            </div>
+          }
+        />
       </SettingGroup>
+
+      {confirmOrphans && orphans && (
+        <ConfirmDialog
+          danger
+          title={tr("Delete unused images?", "Kullanılmayan görseller silinsin mi?")}
+          body={tr(`${orphans.length} image(s), ${formatBytes(orphanBytes)}. This can't be undone; a backup restores them.`,
+                   `${orphans.length} görsel, ${formatBytes(orphanBytes)}. Geri alınamaz; bir yedekten geri yüklenebilir.`)}
+          confirmLabel={tr("Delete", "Sil")}
+          cancelLabel={tr("Cancel", "Vazgeç")}
+          onConfirm={() => void deleteOrphans()}
+          onCancel={() => setConfirmOrphans(false)}
+        />
+      )}
     </>
   );
 }
@@ -1900,8 +2138,36 @@ function BackupPage() {
     showError, showToast,
   } = useAppStore();
   const b = backupPrefs;
+  const { language } = useAppStore();
+  const tr = (en: string, t: string) => (language === "tr" ? t : en);
   const [history, setHistory] = useState<BackupEntry[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [verifying, setVerifying] = useState<string | null>(null);
+  const [verified, setVerified] = useState<{ name: string; report: BackupVerifyReport } | null>(null);
+
+  const pickMirror = async () => {
+    try {
+      const dir = await pickDirectory();
+      if (dir) setBackupPrefs({ mirrorPath: dir, mirrorToCloud: true });
+    } catch (err) {
+      const msg = String(err).toLowerCase();
+      if (!msg.includes("iptal") && !msg.includes("cancel")) showError(err);
+    }
+  };
+  const toggleMirror = (on: boolean) => {
+    if (on && !b.mirrorPath) { void pickMirror(); return; }
+    setBackupPrefs({ mirrorToCloud: on });
+  };
+  const runVerify = async (entry: BackupEntry) => {
+    setVerifying(entry.path);
+    try {
+      setVerified({ name: entry.name, report: await verifyBackup(entry.path) });
+    } catch (err) {
+      showError(err);
+    } finally {
+      setVerifying(null);
+    }
+  };
 
   const reloadHistory = async () => {
     setLoadingHistory(true);
@@ -1951,16 +2217,26 @@ function BackupPage() {
         />
         <SettingRow
           title={ui.backupMirrorCloud}
-          description={ui.backupMirrorCloudDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={b.mirrorPath
+            ? tr(`Each backup is also copied to: ${b.mirrorPath}`, `Her yedek ayrıca şuraya kopyalanır: ${b.mirrorPath}`)
+            : tr("Copy each backup to a folder of your choice, e.g. inside Dropbox or Google Drive.",
+                 "Her yedeği seçtiğin bir klasöre de kopyala, örneğin Dropbox veya Google Drive içinde.")}
+          control={
+            <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+              {b.mirrorPath && (
+                <CompactButton onClick={() => void pickMirror()}>{tr("Change", "Değiştir")}</CompactButton>
+              )}
+              <Toggle checked={b.mirrorToCloud && !!b.mirrorPath} onChange={toggleMirror} />
+            </div>
+          }
         />
       </SettingGroup>
 
       <SettingGroup label={ui.backupGroupRetention}>
         <SettingRow
           title={ui.backupRetention}
+          description={tr("Older automatic backups are deleted. Manual backups are never deleted for you.",
+                          "Daha eski otomatik yedekler silinir. Elle aldığın yedeklere dokunulmaz.")}
           control={
             <SliderRow
               value={b.retentionCount} min={3} max={30} step={1}
@@ -1971,9 +2247,9 @@ function BackupPage() {
         />
         <SettingRow
           title={ui.backupCompressOld}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={tr("Re-packs all but the newest 3 backups at maximum compression. Each one is checked before it replaces the original.",
+                          "En yeni 3 yedek dışındakileri en yüksek sıkıştırmayla yeniden paketler. Her biri, eskisinin yerine geçmeden önce kontrol edilir.")}
+          control={<Toggle checked={b.compressOld} onChange={(v) => setBackupPrefs({ compressOld: v })} />}
         />
       </SettingGroup>
 
@@ -2004,10 +2280,35 @@ function BackupPage() {
         />
         <SettingRow
           title={ui.backupVerify}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={tr("Reads the newest backup end to end and checks it can be restored. Changes nothing.",
+                          "En yeni yedeği baştan sona okur ve geri yüklenebilir olduğunu kontrol eder. Hiçbir şeyi değiştirmez.")}
+          control={
+            <CompactButton onClick={() => history[0] && void runVerify(history[0])} disabled={!history.length || !!verifying}>
+              {verifying ? "…" : tr("Verify latest", "Son yedeği doğrula")}
+            </CompactButton>
+          }
         />
+        {verified && (
+          <div className={"setting-result" + (verified.report.ok ? " is-ok" : " is-warning")} role="status">
+            <div className="setting-result-head">
+              <span>
+                {verified.report.ok
+                  ? tr(`${verified.name} is intact and can be restored.`, `${verified.name} sağlam ve geri yüklenebilir.`)
+                  : tr(`${verified.name} has problems:`, `${verified.name} sorunlu:`)}
+              </span>
+            </div>
+            {verified.report.ok ? (
+              <span className="setting-result-note">
+                {tr(`${verified.report.games} games, ${verified.report.notes} notes, ${verified.report.files} files${verified.report.hasWallet ? ", wallet" : ""}.`,
+                    `${verified.report.games} oyun, ${verified.report.notes} not, ${verified.report.files} dosya${verified.report.hasWallet ? ", cüzdan" : ""}.`)}
+              </span>
+            ) : (
+              <ul className="setting-result-list">
+                {verified.report.problems.slice(0, 10).map((p, i) => <li key={i}><span>{p}</span></li>)}
+              </ul>
+            )}
+          </div>
+        )}
       </SettingGroup>
 
       <SettingGroup label={ui.backupGroupHistory}>
@@ -2031,6 +2332,9 @@ function BackupPage() {
               description={`${formatBytes(entry.sizeBytes)} · ${formatRelative(entry.createdAt)}`}
               control={
                 <div style={{ display: "inline-flex", gap: 6 }}>
+                  <CompactButton onClick={() => void runVerify(entry)} disabled={!!verifying}>
+                    {verifying === entry.path ? "…" : tr("Verify", "Doğrula")}
+                  </CompactButton>
                   <CompactButton
                     onClick={async () => {
                       try {
@@ -2073,53 +2377,6 @@ function formatRelative(iso: string): string {
   return d.toLocaleDateString();
 }
 
-function ImportExportPage() {
-  const { ui, handleExportBackup } = useAppStore();
-  return (
-    <>
-      <SettingGroup label={ui.ieGroupExport}>
-        <SettingRow
-          title={ui.ieExportAll}
-          description={ui.ieExportAllDesc}
-          control={
-            <CompactButton onClick={() => void handleExportBackup()}>
-              {ui.ieExportBtn}
-            </CompactButton>
-          }
-        />
-        <SettingRow
-          title={ui.ieExportGame}
-          description={ui.ieExportGameDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-        <SettingRow
-          title={ui.ieExportNotesMd}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-        <SettingRow
-          title={ui.ieExportTasksCsv}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-      </SettingGroup>
-
-      <SettingGroup label={ui.ieGroupImport} hint={ui.ieImportBanner}>
-        <SettingRow title="Notion"          badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title="Trello"          badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title="Obsidian"        badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.ieImportMd}   badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.ieImportCsv}  badge="v1.0" disabled control={<ComingChip />} />
-        <SettingRow title={ui.ieImportJson} badge="v1.0" disabled control={<ComingChip />} />
-      </SettingGroup>
-    </>
-  );
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // CONNECTIONS
 // ─────────────────────────────────────────────────────────────────────
@@ -2133,6 +2390,37 @@ function ApiKeysPage() {
 
   // Local drafts so the user can edit without spamming saveApiKeys
   // on every keystroke. Persisted on blur / "Save all" / Test click.
+  // Background sync interval per store (lib/storeSync).
+  const [syncPrefs, setSyncPrefs] = useState<StoreSyncPrefs>(() => loadStoreSyncPrefs());
+  const setSync = (p: StoreProvider, minutes: number) => {
+    const next = { ...syncPrefs, [p]: minutes };
+    setSyncPrefs(next);
+    saveStoreSyncPrefs(next);
+  };
+  const syncLabel = (m: number) => {
+    const tr = language === "tr";
+    if (m === 0) return tr ? "Kapalı (yalnız elle)" : "Off (manual only)";
+    if (m < 60) return tr ? `${m} dakikada bir` : `Every ${m} min`;
+    if (m === 60) return tr ? "Saatte bir" : "Every hour";
+    if (m < 1440) return tr ? `${m / 60} saatte bir` : `Every ${m / 60} hours`;
+    return tr ? "Günde bir" : "Once a day";
+  };
+  const syncRow = (p: StoreProvider) => (
+    <SettingRow
+      title={ui.apiSyncInterval}
+      description={language === "tr"
+        ? "Uygulama açıkken mağaza rakamlarını arka planda bu sıklıkla yeniler; Mağaza Merkezi'ndeki günlük gidişat da böyle dolar."
+        : "While the app is open, store numbers refresh in the background this often; it also fills Store Center's daily trend."}
+      control={
+        <Dropdown
+          value={String(syncPrefs[p])}
+          options={SYNC_INTERVAL_OPTIONS.map((m) => ({ id: String(m), label: syncLabel(m) }))}
+          onChange={(id) => setSync(p, Number(id))}
+        />
+      }
+    />
+  );
+
   const [steam, setSteam]       = useState(steamApiKey);
   const [itch, setItch]         = useState(itchApiKey);
   const [steamId, setSteamId]   = useState(steamUserId);
@@ -2235,12 +2523,7 @@ function ApiKeysPage() {
           description={ui.apiSteamIdDesc}
           control={<TextInput value={steamId} onChange={setSteamId} placeholder="76561198000000000" maxLength={20} />}
         />
-        <SettingRow
-          title={ui.apiSyncInterval}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
+        {syncRow("steam")}
       </SettingGroup>
 
       <SettingGroup label={ui.apiGroupItch}>
@@ -2253,12 +2536,7 @@ function ApiKeysPage() {
             </div>
           }
         />
-        <SettingRow
-          title={ui.apiSyncInterval}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
+        {syncRow("itch")}
       </SettingGroup>
 
       <SettingGroup label={ui.apiGroupPlay}>
@@ -2273,12 +2551,7 @@ function ApiKeysPage() {
             </div>
           }
         />
-        <SettingRow
-          title={ui.apiSyncInterval}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
+        {syncRow("play")}
       </SettingGroup>
 
       <SettingGroup label={ui.apiGroupSave}>
@@ -2724,10 +2997,53 @@ function TeamMembersPanel({ workspacePath, language }: { workspacePath: string; 
 }
 
 function WebhooksPage() {
-  const { ui, webhooks, setWebhooks, showToast, showError } = useAppStore();
+  const { ui, webhooks, setWebhooks, showToast, showError, language, profile } = useAppStore();
   const d = webhooks.discord;
   const g = webhooks.github;
+  const custom = webhooks.custom ?? [];
   const [testing, setTesting] = useState(false);
+  const trW = (en: string, t: string) => (language === "tr" ? t : en);
+  const ALL_EVENTS: WebhookEvent[] = ["versionPublished", "taskCompleted", "pressKitGenerated", "buildReady"];
+  const eventLabel = (ev: WebhookEvent) =>
+    ev === "versionPublished" ? ui.webhookEventVersion :
+    ev === "taskCompleted"    ? ui.webhookEventTask :
+    ev === "pressKitGenerated" ? ui.webhookEventPressKit :
+                                ui.webhookEventBuild;
+
+  // ── Custom webhooks ────────────────────────────────────────────────
+  const [newName, setNewName] = useState("");
+  const [newUrl, setNewUrl] = useState("");
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const urlOk = (u: string) => /^https:\/\//i.test(u.trim()) || /^http:\/\/(localhost|127\.0\.0\.1)/i.test(u.trim());
+  const setCustom = (next: CustomWebhook[]) => setWebhooks({ custom: next });
+  const addCustom = () => {
+    if (!urlOk(newUrl)) {
+      showToast(trW("The address must start with https://", "Adres https:// ile başlamalı"), "warning");
+      return;
+    }
+    setCustom([...custom, {
+      id: crypto.randomUUID(),
+      name: newName.trim() || new URL(newUrl.trim()).host,
+      url: newUrl.trim(),
+      events: ["versionPublished"],
+      enabled: true,
+    }]);
+    setNewName("");
+    setNewUrl("");
+  };
+  const patchCustom = (id: string, p: Partial<CustomWebhook>) =>
+    setCustom(custom.map((h) => (h.id === id ? { ...h, ...p } : h)));
+  const testCustom = async (h: CustomWebhook) => {
+    setTestingId(h.id);
+    try {
+      await postCustomWebhook(h.url, customPayload("versionPublished", { game: "HeraVex", version: "test", user: profile.displayName || "you" }));
+      showToast(ui.webhookTestSent, "success");
+    } catch (err) {
+      showError(err);
+    } finally {
+      setTestingId(null);
+    }
+  };
 
   const sendDiscordTest = async () => {
     if (!d.webhookUrl.trim()) {
@@ -2855,13 +3171,62 @@ function WebhooksPage() {
         />
       </SettingGroup>
 
-      <SettingGroup label={ui.webhookGroupCustom} hint={ui.webhookCustomBanner}>
+      <SettingGroup
+        label={ui.webhookGroupCustom}
+        hint={trW("HeraVex sends a JSON POST to your address on the events you pick (Slack, Zapier, Make, n8n, your own server).",
+                  "Seçtiğin olaylarda HeraVex adresine JSON POST gönderir (Slack, Zapier, Make, n8n veya kendi sunucun).")}
+      >
+        {custom.length === 0 && (
+          <SettingRow title={ui.webhookCustomNone} description={ui.webhookCustomDesc} />
+        )}
+        {custom.map((h) => (
+          <div key={h.id} className="custom-webhook">
+            <SettingRow
+              title={h.name}
+              description={h.url}
+              control={
+                <div className="setting-inline-pair">
+                  <CompactButton onClick={() => void testCustom(h)} disabled={testingId === h.id}>
+                    {testingId === h.id ? "…" : ui.webhookSendTest}
+                  </CompactButton>
+                  <CompactButton variant="danger" onClick={() => setCustom(custom.filter((x) => x.id !== h.id))}>
+                    {trW("Remove", "Kaldır")}
+                  </CompactButton>
+                  <Toggle checked={h.enabled} onChange={(v) => patchCustom(h.id, { enabled: v })} />
+                </div>
+              }
+            />
+            <div className="custom-webhook-events" role="group" aria-label={trW("Events", "Olaylar")}>
+              {ALL_EVENTS.map((ev) => {
+                const on = h.events.includes(ev);
+                return (
+                  <button
+                    key={ev}
+                    type="button"
+                    aria-pressed={on}
+                    className={"filter-chip" + (on ? " filter-chip-active" : "")}
+                    onClick={() => patchCustom(h.id, { events: on ? h.events.filter((x) => x !== ev) : [...h.events, ev] })}
+                  >
+                    {eventLabel(ev)}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
         <SettingRow
-          title={ui.webhookCustomNone}
-          description={ui.webhookCustomDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          title={trW("Add a webhook", "Webhook ekle")}
+          description={trW(
+            "Body: { app, event, game, version, task, user, timestamp, text }. \"text\" makes Slack-style URLs work as-is.",
+            "Gövde: { app, event, game, version, task, user, timestamp, text }. \"text\" sayesinde Slack tipi adresler olduğu gibi çalışır.",
+          )}
+          control={
+            <div className="setting-inline-pair">
+              <TextInput value={newName} onChange={setNewName} placeholder={trW("Name", "Ad")} maxLength={40} width={110} />
+              <TextInput value={newUrl} onChange={setNewUrl} placeholder="https://…" maxLength={500} width={200} />
+              <CompactButton onClick={addCustom} disabled={!newUrl.trim()}>{trW("Add", "Ekle")}</CompactButton>
+            </div>
+          }
         />
       </SettingGroup>
     </>
@@ -2873,8 +3238,29 @@ function WebhooksPage() {
 // ─────────────────────────────────────────────────────────────────────
 
 function PrivacyPage() {
-  const { ui, privacy, setPrivacy, showToast, showError, refreshGames } = useAppStore();
+  const { ui, privacy, setPrivacy, showToast, showError, refreshGames, language } = useAppStore();
   const p = privacy;
+  // OS keychain for API keys — Rust is the source of truth.
+  const [keychain, setKeychain] = useState<{ supported: boolean; enabled: boolean } | null>(null);
+  const [keychainBusy, setKeychainBusy] = useState(false);
+  useEffect(() => {
+    invoke<{ supported: boolean; enabled: boolean }>("keychain_status")
+      .then(setKeychain)
+      .catch(() => setKeychain({ supported: false, enabled: false }));
+  }, []);
+  const toggleKeychain = async (on: boolean) => {
+    setKeychainBusy(true);
+    try {
+      setKeychain(await invoke<{ supported: boolean; enabled: boolean }>("set_secrets_in_keychain", { enabled: on }));
+      showToast(on
+        ? (language === "tr" ? "API anahtarları anahtar zincirine taşındı." : "API keys moved to the keychain.")
+        : (language === "tr" ? "API anahtarları ayar dosyasına geri alındı." : "API keys moved back to the settings file."), "success");
+    } catch (err) {
+      showError(err);
+    } finally {
+      setKeychainBusy(false);
+    }
+  };
   const [showTelemetryDetails, setShowTelemetryDetails] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
@@ -2915,10 +3301,18 @@ function PrivacyPage() {
       <SettingGroup label={ui.privacyGroupKeys}>
         <SettingRow
           title={ui.privacyKeychain}
-          description={ui.privacyKeychainDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={keychain && !keychain.supported
+            ? (language === "tr" ? "Bu sistemde desteklenmiyor (Linux)." : "Not supported on this system (Linux).")
+            : (language === "tr"
+              ? "Steam ve Itch.io API anahtarları Windows Kimlik Bilgisi Yöneticisi / macOS Anahtar Zinciri'nde saklanır; ayar dosyasında ve yedeklerde yer almaz. Başka bilgisayarda yedeği açınca anahtarları yeniden girmen gerekir."
+              : "Steam and Itch.io API keys are kept in Windows Credential Manager / macOS Keychain, not in the settings file or backups. Restoring a backup on another computer means entering them again.")}
+          disabled={!keychain?.supported}
+          control={
+            <Toggle
+              checked={keychain?.enabled === true}
+              onChange={(v) => { if (!keychainBusy) void toggleKeychain(v); }}
+            />
+          }
         />
         <SettingRow
           title={ui.privacyMaskValues}
@@ -3065,31 +3459,28 @@ function PrivacyPage() {
 }
 
 function ExperimentalPage() {
-  const { ui, experimental, setExperimental, showError } = useAppStore();
+  const { ui, experimental, setExperimental, showError, language } = useAppStore();
   const e = experimental;
+  const trX = (en: string, t: string) => (language === "tr" ? t : en);
+  const widgets = e.customWidgets ?? [];
+  const setWidgets = (next: CustomWidget[]) => setExperimental({ customWidgets: next });
+  const patchWidget = (id: string, p: Partial<CustomWidget>) =>
+    setWidgets(widgets.map((w) => (w.id === id ? { ...w, ...p } : w)));
+  const addWidget = (type: CustomWidget["type"]) => {
+    const title = type === "note" ? trX("Note", "Not") : type === "countdown" ? trX("Launch", "Çıkış") : trX("Links", "Bağlantılar");
+    setWidgets([...widgets, { id: crypto.randomUUID(), type, title, text: "", date: "" }]);
+  };
+  const goTo = (section: string) => window.dispatchEvent(new CustomEvent("heravex:settings-go", { detail: section }));
+  const graduated = <span className="setting-version-tag">{trX("Now built in", "Artık kalıcı")}</span>;
 
   return (
     <>
       <SettingGroup label={ui.expGroupGeneral}>
         <SettingRow
           title={ui.expBetaEnabled}
-          description={ui.expBetaEnabledDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-        <SettingRow
-          title={ui.expChannel}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-        <SettingRow
-          title={ui.expJoin}
-          description={ui.expJoinDesc}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={trX("Master switch: while it's off, no beta feature runs, even if its own toggle is on.",
+                           "Ana anahtar: kapalıyken, kendi anahtarı açık olsa bile hiçbir beta özellik çalışmaz.")}
+          control={<Toggle checked={e.betaEnabled} onChange={(v) => setExperimental({ betaEnabled: v })} />}
         />
       </SettingGroup>
 
@@ -3097,22 +3488,66 @@ function ExperimentalPage() {
         {/* M7 ships no active betas — the toggles will land slice-by-slice
          *  in v1.0. We surface the design now so users can audit. */}
         <SettingRow
+          title={ui.expBetaCustomWidgets}
+          description={trX("Your own Dashboard panels: a pinned note, a countdown to a date, quick links.",
+                           "Ana sayfaya kendi panellerin: sabit bir not, bir tarihe geri sayım, hızlı bağlantılar.")}
+          disabled={!e.betaEnabled}
+          control={<Toggle checked={e.betaCustomWidgets} onChange={(v) => setExperimental({ betaCustomWidgets: v })} />}
+        />
+        {e.betaEnabled && e.betaCustomWidgets && (
+          <div className="custom-widget-editor">
+            {widgets.map((w) => (
+              <div key={w.id} className="custom-widget-edit">
+                <div className="custom-widget-edit-head">
+                  <span className="setting-version-tag setting-version-tag-muted">
+                    {w.type === "note" ? trX("Note", "Not") : w.type === "countdown" ? trX("Countdown", "Geri sayım") : trX("Links", "Bağlantılar")}
+                  </span>
+                  <TextInput value={w.title} onChange={(v) => patchWidget(w.id, { title: v })} placeholder={trX("Title", "Başlık")} maxLength={60} width={200} />
+                  {w.type === "countdown" && (
+                    <input
+                      type="date"
+                      className="setting-text-input"
+                      style={{ width: 150 }}
+                      value={w.date ?? ""}
+                      onChange={(ev) => patchWidget(w.id, { date: ev.target.value })}
+                    />
+                  )}
+                  <CompactButton variant="danger" onClick={() => setWidgets(widgets.filter((x) => x.id !== w.id))}>
+                    {trX("Remove", "Kaldır")}
+                  </CompactButton>
+                </div>
+                {w.type !== "countdown" && (
+                  <TextArea
+                    value={w.text ?? ""}
+                    onChange={(v) => patchWidget(w.id, { text: v })}
+                    rows={w.type === "links" ? 3 : 4}
+                    maxLength={2000}
+                    width={520}
+                    placeholder={w.type === "links"
+                      ? trX("One per line:  Steam page | https://store.steampowered.com/…", "Her satıra bir tane:  Steam sayfası | https://store.steampowered.com/…")
+                      : trX("Write anything: goals, a reminder, a short checklist…", "İstediğini yaz: hedefler, bir hatırlatma, kısa bir liste…")}
+                  />
+                )}
+              </div>
+            ))}
+            <div className="custom-widget-add">
+              <CompactButton onClick={() => addWidget("note")}>+ {trX("Note", "Not")}</CompactButton>
+              <CompactButton onClick={() => addWidget("countdown")}>+ {trX("Countdown", "Geri sayım")}</CompactButton>
+              <CompactButton onClick={() => addWidget("links")}>+ {trX("Links", "Bağlantılar")}</CompactButton>
+            </div>
+          </div>
+        )}
+        <SettingRow
           title={ui.expBetaNotionImport}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={trX("Out of beta: Settings → Import & Export → Notion.", "Betadan çıktı: Ayarlar → İçe/Dışa Aktar → Notion.")}
+          badge={graduated}
+          control={<CompactButton onClick={() => goTo("importExport")}>{trX("Open", "Aç")}</CompactButton>}
         />
         <SettingRow
           title={ui.expBetaMultiWorkspace}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
-        />
-        <SettingRow
-          title={ui.expBetaCustomWidgets}
-          badge="v1.0"
-          disabled
-          control={<ComingChip />}
+          description={trX("Out of beta: create and switch workspaces from the workspace menu at the top of the sidebar.",
+                           "Betadan çıktı: kenar çubuğunun üstündeki çalışma alanı menüsünden oluştur ve geçiş yap.")}
+          badge={graduated}
         />
       </SettingGroup>
 

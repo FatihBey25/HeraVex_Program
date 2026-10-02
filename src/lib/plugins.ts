@@ -33,6 +33,7 @@ import {
   addHookFilter, addHookListener, removePluginHooks,
   type HookName, type HookPayloads,
 } from "./pluginHooks";
+import { registerPluginTheme, unregisterPluginThemesFor } from "./pluginThemes";
 import type { GameRecord, NoteRecord, TaskItem, ExpenseItem } from "../types";
 
 // ── Manifest (what plugin authors write) ────────────────────────────
@@ -151,8 +152,24 @@ export interface HeraVexAPI {
     injectStyle(css: string): () => void;
     /** Run `cb` for every current AND future element matching
      *  `selector` (MutationObserver-backed). Decorate, rewire, replace —
-     *  the element is yours. Returns dispose. */
+     *  the element is yours. Returns dispose.
+     *  ⚠️ NEVER append into / remove children from React-owned nodes —
+     *  use `mountToSlot` for safe injection. */
     onElement(selector: string, cb: (el: HTMLElement) => void): () => void;
+    /** SAFE injection: append `el` into the core's stable `data-hv-slot`
+     *  mount point ("sidebar-nav-end", "dashboard-top"). The
+     *  slot is React-empty so appending never crashes reconciliation;
+     *  re-appended if the slot remounts; removed on dispose. */
+    mountToSlot(slot: string, el: HTMLElement): () => void;
+  };
+
+  /** Register a custom theme the core renders + applies safely. Requires
+   *  "dom". Appears as a preview card in the quick-theme picker
+   *  (Settings → Appearance) next to the built-in background themes; the
+   *  core owns apply/persist/revert. `css` should theme BOTH the main
+   *  background and the sidebar. Optional preview colours drive the card. */
+  themes: {
+    register(theme: { id: string; label: string; css: string; preview?: string; previewAccent?: string }): () => void;
   };
 
   /** Core-operation interception. Requires "hooks". */
@@ -372,6 +389,32 @@ function makeHv(p: RuntimePlugin): HeraVexAPI {
         obs.observe(document.body, { childList: true, subtree: true });
         return track(() => obs.disconnect());
       },
+      mountToSlot(slot, el) {
+        need("dom");
+        const sel = `[data-hv-slot="${String(slot).replace(/"/g, "")}"]`;
+        el.setAttribute("data-hv-plugin", p.manifest.id);
+        const place = () => {
+          const target = document.querySelector(sel);
+          if (target && el.parentNode !== target) target.appendChild(el);
+        };
+        place();
+        // Re-place if the slot remounts (React re-render of that region).
+        const obs = new MutationObserver(place);
+        obs.observe(document.body, { childList: true, subtree: true });
+        return track(() => { obs.disconnect(); el.remove(); });
+      },
+    },
+
+    themes: {
+      register(theme) {
+        need("dom");
+        const key = `${p.manifest.id}:${theme.id}`;
+        return track(registerPluginTheme({
+          key, id: theme.id, label: theme.label, css: theme.css,
+          preview: theme.preview, previewAccent: theme.previewAccent,
+          pluginId: p.manifest.id, pluginName: p.manifest.name,
+        }));
+      },
     },
 
     hooks: {
@@ -454,16 +497,25 @@ function makeHv(p: RuntimePlugin): HeraVexAPI {
 
 interface ListedPlugin { manifest: HeraVexPluginManifest; entryPath: string; dir: string }
 
-async function activatePlugin(p: RuntimePlugin): Promise<void> {
-  const code = await invoke<string>("read_text_file", { path: p.entryPath });
+type PluginModule = { default?: unknown; activate?: unknown; deactivate?: () => void };
+
+/** Turns the entry file's source into a module. Real app: Blob URL
+ *  import. Tests swap it (jsdom can't import Blob URLs). */
+let loadPluginModule = async (code: string, p: RuntimePlugin): Promise<PluginModule> => {
   const blob = new Blob([code], { type: "text/javascript" });
   const url = URL.createObjectURL(blob);
   p.blobUrl = url;
-  const mod = await import(/* @vite-ignore */ url) as {
-    default?: unknown;
-    activate?: unknown;
-    deactivate?: () => void;
-  };
+  return await import(/* @vite-ignore */ url) as PluginModule;
+};
+
+/** Test seam only. */
+export function _setPluginModuleLoader(fn: (code: string) => Promise<PluginModule>): void {
+  loadPluginModule = (code) => fn(code);
+}
+
+async function activatePlugin(p: RuntimePlugin): Promise<void> {
+  const code = await invoke<string>("read_text_file", { path: p.entryPath });
+  const mod = await loadPluginModule(code, p);
 
   const isLegacyWidget = !p.manifest.contributes && !!p.manifest.slot;
   if (isLegacyWidget) {
@@ -472,12 +524,12 @@ async function activatePlugin(p: RuntimePlugin): Promise<void> {
     p.widgets.set("legacy", { slot: p.manifest.slot!, render: render as PluginRender });
   } else {
     const activate = (typeof mod.default === "function" ? mod.default : mod.activate) as
-      | ((hv: HeraVexAPI) => void | (() => void))
+      | ((hv: HeraVexAPI) => void | (() => void) | Promise<void | (() => void)>)
       | undefined;
     if (typeof activate !== "function") {
       throw new Error("eklenti bir activate(hv) fonksiyonu export etmiyor");
     }
-    const ret = activate(makeHv(p));
+    const ret = await activate(makeHv(p));
     if (typeof ret === "function") p.deactivate = ret;
     else if (typeof mod.deactivate === "function") p.deactivate = mod.deactivate;
   }
@@ -491,6 +543,7 @@ function teardownPlugin(p: RuntimePlugin) {
   for (const dispose of p.disposers) { try { dispose(); } catch { /* plugin */ } }
   p.disposers.clear();
   removePluginHooks(p.manifest.id);
+  unregisterPluginThemesFor(p.manifest.id);
   p.menuItems.length = 0;
   p.slashCommands.length = 0;
   if (p.blobUrl) { try { URL.revokeObjectURL(p.blobUrl); } catch { /* no-op */ } }
@@ -500,61 +553,75 @@ function teardownPlugin(p: RuntimePlugin) {
 }
 
 let initPromise: Promise<void> | null = null;
+let initAgain = false;
 
 /** Discover + activate every enabled plugin. Idempotent; call again to
- *  refresh after install/uninstall/toggle. */
+ *  refresh after install/uninstall/toggle. A call made while a pass is
+ *  running schedules one more pass, so its change (toggle, install) is
+ *  never lost. */
 export async function initPlugins(): Promise<void> {
-  // Serialise concurrent callers onto one pass.
-  if (initPromise) return initPromise;
+  if (initPromise) {
+    initAgain = true;
+    return initPromise;
+  }
   initPromise = (async () => {
-    let listed: ListedPlugin[] = [];
-    try {
-      listed = await invoke<ListedPlugin[]>("plugins_list");
-    } catch (err) {
-      devWarn("[plugins] discovery failed:", err);
-    }
-    const enabledMap = readEnabledMap();
-    const seen = new Set<string>();
-
-    for (const item of listed) {
-      const id = item.manifest?.id;
-      if (!id || item.manifest.apiVersion !== 1) continue;
-      seen.add(id);
-      const enabled = enabledMap[id] !== false; // opt-out default
-      let p = runtime.get(id);
-      if (!p) {
-        p = {
-          manifest: item.manifest, dir: item.dir, entryPath: item.entryPath,
-          enabled, status: "disabled",
-          pages: new Map(), widgets: new Map(), commands: new Map(), settings: new Map(),
-          disposers: new Set(), menuItems: [], slashCommands: [],
-        };
-        runtime.set(id, p);
-      } else {
-        teardownPlugin(p);
-        p.manifest = item.manifest;
-        p.dir = item.dir;
-        p.entryPath = item.entryPath;
-        p.enabled = enabled;
-        p.error = undefined;
-      }
-      if (!enabled) { p.status = "disabled"; continue; }
+    do {
+      initAgain = false;
+      let listed: ListedPlugin[] = [];
       try {
-        await activatePlugin(p);
+        listed = await invoke<ListedPlugin[]>("plugins_list");
       } catch (err) {
-        p.status = "error";
-        p.error = String(err instanceof Error ? err.message : err);
-        devWarn(`[plugins] ${id} yüklenemedi:`, err);
-        window.dispatchEvent(new CustomEvent("heravex:plugin-failed", {
-          detail: { id, name: p.manifest.name, error: p.error },
-        }));
+        devWarn("[plugins] discovery failed:", err);
       }
-    }
-    // Drop runtimes for plugins that were uninstalled on disk.
-    for (const [id, p] of runtime) {
-      if (!seen.has(id)) { teardownPlugin(p); runtime.delete(id); }
-    }
-    notifyChanged();
+      const enabledMap = readEnabledMap();
+      const seen = new Set<string>();
+
+      for (const item of listed) {
+        const id = item.manifest?.id;
+        if (!id || item.manifest.apiVersion !== 1) continue;
+        seen.add(id);
+        const enabled = enabledMap[id] !== false; // opt-out default
+        let p = runtime.get(id);
+        if (!p) {
+          p = {
+            manifest: item.manifest, dir: item.dir, entryPath: item.entryPath,
+            enabled, status: "disabled",
+            pages: new Map(), widgets: new Map(), commands: new Map(), settings: new Map(),
+            disposers: new Set(), menuItems: [], slashCommands: [],
+          };
+          runtime.set(id, p);
+        } else {
+          teardownPlugin(p);
+          p.manifest = item.manifest;
+          p.dir = item.dir;
+          p.entryPath = item.entryPath;
+          p.enabled = enabled;
+          p.error = undefined;
+        }
+        if (!enabled) { p.status = "disabled"; continue; }
+        try {
+          await activatePlugin(p);
+        } catch (err) {
+          // A plugin can throw PART-WAY through activate() — after it
+          // already injected a style / registered an observer / applied a
+          // theme. Tear those down so a FAILED plugin leaves zero residue
+          // (this is why an errored god-mode still showed its neon theme).
+          const msg = String(err instanceof Error ? err.message : err);
+          teardownPlugin(p);
+          p.status = "error";
+          p.error = msg;
+          devWarn(`[plugins] ${id} yüklenemedi:`, err);
+          window.dispatchEvent(new CustomEvent("heravex:plugin-failed", {
+            detail: { id, name: p.manifest.name, error: p.error },
+          }));
+        }
+      }
+      // Drop runtimes for plugins that were uninstalled on disk.
+      for (const [id, p] of runtime) {
+        if (!seen.has(id)) { teardownPlugin(p); runtime.delete(id); }
+      }
+      notifyChanged();
+    } while (initAgain);
   })();
   try { await initPromise; } finally { initPromise = null; }
 }
@@ -651,7 +718,7 @@ export async function mountPluginWidgets(
   container: HTMLElement,
   _legacyCtx?: unknown,
 ): Promise<void> {
-  await unmountPluginWidgets(slot);
+  unmountWidgetsSync(slot);
   for (const p of runtime.values()) {
     if (p.status !== "active") continue;
     for (const [wid, w] of p.widgets) {
@@ -676,12 +743,16 @@ export async function mountPluginWidgets(
   }
 }
 
-export async function unmountPluginWidgets(slot?: string): Promise<void> {
+function unmountWidgetsSync(slot?: string): void {
   for (const [key, entry] of MOUNTED.entries()) {
     if (slot && !key.startsWith(`${slot}:`)) continue;
     entry.dispose();
     MOUNTED.delete(key);
   }
+}
+
+export async function unmountPluginWidgets(slot?: string): Promise<void> {
+  unmountWidgetsSync(slot);
 }
 
 // ── Install / uninstall (Rust-backed, consent-gated) ────────────────
@@ -706,6 +777,17 @@ export async function discardStagedPlugin(staged: string): Promise<void> {
 
 export async function uninstallPlugin(id: string): Promise<void> {
   await invoke<void>("plugin_uninstall", { id });
+  // Its hv.storage data and enabled flag would otherwise linger forever.
+  try {
+    const prefix = `heravex_plugin_${id}_`;
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(prefix)) localStorage.removeItem(k);
+    }
+    const map = readEnabledMap();
+    delete map[id];
+    writeEnabledMap(map);
+  } catch { /* storage blocked */ }
   await initPlugins();
 }
 

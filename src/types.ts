@@ -51,6 +51,8 @@ export type PressKitInput = {
   /** Opt-in dark palette for the otherwise-light templates
    *  (minimal & factsheet). Ignored by classic & indie. */
   darkMode?: boolean;
+  /** Settings → Studio logo; shown next to the developer name. */
+  studioLogoPath?: string;
 };
 
 export type ActivityEntry = {
@@ -240,6 +242,8 @@ export type VersionItem = {
   buildFileName?: string;
   buildRelativePath?: string;
   buildFileSizeBytes?: number;
+  /** Set when Settings → Storage pruned this version's build file. */
+  buildPrunedAt?: string;
 };
 
 export type StoreMappingEntry = {

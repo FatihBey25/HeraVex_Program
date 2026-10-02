@@ -61,8 +61,23 @@ export const DEFAULT_PRIVACY: PrivacySlice = {
 
 export type ReleaseChannel = "stable" | "beta" | "nightly";
 
+/** Settings → Experimental → Custom dashboard widgets. */
+export interface CustomWidget {
+  id: string;
+  type: "note" | "countdown" | "links";
+  title: string;
+  /** note: the text; links: `Label | https://url` per line. */
+  text?: string;
+  /** countdown: YYYY-MM-DD. */
+  date?: string;
+}
+
 export interface ExperimentalSlice {
+  /** Master switch: beta features only run while this is on. */
   betaEnabled: boolean;
+  /** Beta: the user's own Dashboard panels. */
+  betaCustomWidgets: boolean;
+  customWidgets: CustomWidget[];
   channel: ReleaseChannel;
   /** Master gate for the developer rows. When false the actions in
    *  the Developer group are hidden from the Settings page UI. */
@@ -76,6 +91,8 @@ export interface ExperimentalSlice {
 
 export const DEFAULT_EXPERIMENTAL: ExperimentalSlice = {
   betaEnabled: false,
+  betaCustomWidgets: false,
+  customWidgets: [],
   channel: "stable",
   developerMode: false,
   logApiCalls: false,

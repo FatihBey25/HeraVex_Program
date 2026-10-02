@@ -1,11 +1,10 @@
 ﻿import { useRef, useState, type ChangeEvent } from "react";
-import { Clock, Megaphone } from "lucide-react";
+import { Megaphone } from "lucide-react";
 import { useAppStore } from "../../../store";
 import { TagEditor } from "../../shared/TagEditor";
 import { PLATFORMS } from "../../../lib/storage";
 import { openCurrentBuild } from "../../../lib/storage";
 import { saveImageToDisk, fileToBase64 } from "../../../lib/images";
-import { sumEffectiveSeconds, formatDuration, useSecondTicker } from "../../../lib/taskTimer";
 import { PressKitModal } from "../../modals/PressKitModal";
 import type { GameRecord } from "../../../types";
 
@@ -16,13 +15,7 @@ export function OverviewTab({ gameId }: { gameId: string }) {
   const [tagInput, setTagInput] = useState("");
   const [pressKitOpen, setPressKitOpen] = useState(false);
 
-  // Live update if any task is running.
-  const anyRunning = !!game?.tasks?.some((t) => !t.done && t.runningSince);
-  useSecondTicker(anyRunning);
-
   if (!game) return null;
-
-  const totalSeconds = sumEffectiveSeconds(game.tasks);
 
   const update = (patch: Partial<GameRecord>) =>
     void handleSaveGame({ ...game, ...patch });
@@ -117,14 +110,6 @@ export function OverviewTab({ gameId }: { gameId: string }) {
           })}
         </div>
       </div>
-
-      {totalSeconds > 0 && (
-        <div className="game-time-aggregate" title={language === "tr" ? "Tüm görevlerde harcanan toplam süre" : "Total time across all tasks"}>
-          <Clock size={14} strokeWidth={2} />
-          <span>{language === "tr" ? "Bu oyuna harcanan" : "Time on this game"}:</span>
-          <strong>{formatDuration(totalSeconds, language)}</strong>
-        </div>
-      )}
 
       <div className="button-row">
         <button className="secondary-button" onClick={() => coverInputRef.current?.click()}>

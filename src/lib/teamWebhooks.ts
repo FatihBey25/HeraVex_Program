@@ -71,9 +71,20 @@ export interface GithubWebhookCfg {
   defaultRepo: string;
 }
 
+/** Settings → Webhooks → Custom: the user's own endpoint, sent a JSON
+ *  POST on the chosen events (see lib/webhookEvents). */
+export interface CustomWebhook {
+  id: string;
+  name: string;
+  url: string;
+  events: WebhookEvent[];
+  enabled: boolean;
+}
+
 export interface WebhooksSlice {
   discord: DiscordWebhookCfg;
   github: GithubWebhookCfg;
+  custom: CustomWebhook[];
 }
 
 export const DEFAULT_WEBHOOKS: WebhooksSlice = {
@@ -88,6 +99,7 @@ export const DEFAULT_WEBHOOKS: WebhooksSlice = {
     autoCreateRelease: false,
     defaultRepo: "",
   },
+  custom: [],
 };
 
 // ── localStorage ─────────────────────────────────────────────────────

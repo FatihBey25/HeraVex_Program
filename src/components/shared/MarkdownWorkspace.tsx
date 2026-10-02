@@ -35,6 +35,7 @@ import {
   assetKindFromPath, buildAssetHtml, pickAssetFile, resolveAssetSrcs,
 } from "../../lib/noteAssets";
 import { getPluginSlashCommands } from "../../lib/plugins";
+import { sanitizeNoteHtml } from "../../lib/sanitizeHtml";
 // Inline mirror of the language list to keep the heavy highlight.js
 // bundle out of the main chunk — the editor only paid the cost
 // before because the import here pulled the whole highlighter graph.
@@ -145,8 +146,9 @@ export function MarkdownWorkspace({
   const toHtml = (raw: string): string => {
     if (!raw) return "";
     // Trivial heuristic: if it already contains a tag, treat as HTML.
-    if (/<\/?[a-z][\s\S]*?>/i.test(raw)) return raw;
-    return markdownToHtml(raw);
+    // Sanitised: notes can come from teammates or imported files.
+    if (/<\/?[a-z][\s\S]*?>/i.test(raw)) return sanitizeNoteHtml(raw);
+    return sanitizeNoteHtml(markdownToHtml(raw));
   };
 
   // Push value into the editor on mount + whenever the parent hands

@@ -98,6 +98,11 @@ export function VersionsTab({ gameId }: { gameId: string }) {
               <small className="version-file">
                 {item.buildFileName}
                 {item.buildFileSizeBytes ? ` · ${formatFileSize(item.buildFileSizeBytes)}` : ""}
+                {item.buildPrunedAt && !item.buildRelativePath && (
+                  <em className="version-file-pruned">
+                    {language === "tr" ? " · dosya otomatik temizlendi" : " · file auto-pruned"}
+                  </em>
+                )}
               </small>
             )}
             <div className="button-row version-card-actions">

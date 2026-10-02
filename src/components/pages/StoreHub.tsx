@@ -1,55 +1,69 @@
-import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { motion, MotionConfig } from "framer-motion";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer, Cell,
-  PieChart, Pie, Legend,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
 } from "recharts";
 import {
-  Store, Sparkles, Eye, Download, DollarSign, RefreshCw, AlertTriangle,
-  Gamepad2, Joystick, Smartphone, Users, Star, Newspaper, Activity,
-  MessageSquare, TrendingUp, TrendingDown, Link2, Check,
+  RefreshCw, AlertTriangle, Gamepad2, Joystick, Smartphone, Star, Store,
+  Link2, ArrowUpRight, ArrowDownRight, ChevronRight, Download, DollarSign,
+  Eye, Heart, Users, BarChart3, TrendingUp, Plus,
 } from "lucide-react";
 import { useAppStore } from "../../store";
-import { fetchStoreData } from "../../lib/storage";
+import {
+  REPORTS, cachedRows, mappedStoreTargets, syncTargets,
+  type AggregateRow, type MetricKey,
+} from "../../lib/storeSync";
+import { imgSrc } from "../../lib/images";
+import { dayKey, loadHistory, previousSnapshot, type StoreSnapshot } from "../../lib/storeHubHistory";
 import type { StoreProvider } from "../../types";
 
-type AggregateRow = {
-  gameId: string;
-  title: string;
-  provider: StoreProvider;
-  views: number;
-  downloads: number;
-  earnings: number;
-  currency: string | null;
-  currentPlayers: number;
-  ratingAverage: number | null;
-  ratingCount: number | null;
-  lastNewsTitle: string | null;
-  lastNewsUrl: string | null;
-  lastNewsAt: string | null;
-  activeInstalls: number | null;
-  uninstalls: number | null;
-  error?: string;
-};
+// Store Center (v0.9.9, final).
+//
+// Built from the same parts as Dashboard / Analytics (panel + panel-head
+// with icon tile and eyebrow, hero-stat-card) so it reads as part of the
+// app. Reading order:
+//   1. Hero        store logo, what's connected, refresh
+//   2. Stat cards  up to 3 totals + rating, with change since last day
+//   3. Compare     games (or stores) side by side on one metric, with
+//                  each one's share of the total   |   Games: per-game
+//                  details, click to open. Both panels are the same
+//                  height; a long games list scrolls inside its panel.
+//   4. Trend       daily chart once 2+ days of readings exist
+// Store-only figures (wishlists, players, installs) appear only where the
+// store actually reports them; nothing is padded with "n/a".
 
-const PALETTE = ["#4f8cff", "#a78bfa", "#34d399", "#f59e0b", "#f87171", "#60a5fa", "#fb7185"];
-
-// Position-based color hierarchy for the leaderboard so distinct projects pop
-// even when they share the same store provider.
-const LEADERBOARD_TIER: Record<number, string> = {
-  0: "#fbbf24", // gold
-  1: "#e2e8f0", // silver
-  2: "#fb923c", // bronze
-};
-function leaderboardColor(idx: number, providerColor: string): string {
-  return LEADERBOARD_TIER[idx] ?? providerColor;
-}
+type CompareKey = MetricKey | "rating";
 
 const PROVIDER_COLOR: Record<StoreProvider, string> = {
-  steam: "#4f8cff",
-  itch: "#f87171",
-  play: "#34d399",
+  steam: "#5b8def",
+  itch: "#ef6f6c",
+  play: "#3fbf8f",
 };
+
+const METRIC_ORDER: MetricKey[] = ["views", "downloads", "purchases", "earnings", "wishlist", "currentPlayers"];
+const SUMMARY_PRIORITY: MetricKey[] = ["downloads", "earnings", "views", "wishlist", "currentPlayers"];
+const TREND_METRICS: MetricKey[] = ["downloads", "earnings", "views", "wishlist"];
+const COMPARE_METRICS: CompareKey[] = ["downloads", "earnings", "views", "wishlist", "currentPlayers", "rating"];
+
+/** Same accent family the other pages use for these stats. */
+const METRIC_ACCENT: Record<MetricKey, string> = {
+  downloads: "#34d399",
+  earnings: "#facc15",
+  views: "#4f8cff",
+  wishlist: "#a78bfa",
+  currentPlayers: "#f87171",
+  purchases: "#fb923c",
+};
+const METRIC_ICON: Record<MetricKey, typeof Download> = {
+  downloads: Download,
+  earnings: DollarSign,
+  views: Eye,
+  wishlist: Heart,
+  currentPlayers: Users,
+  purchases: DollarSign,
+};
+
+const n0 = (v: number | null | undefined) => v ?? 0;
 
 const PROVIDER_LABEL: Record<StoreProvider, string> = {
   steam: "Steam",
@@ -63,23 +77,8 @@ const PROVIDER_ICON: Record<StoreProvider, typeof Joystick> = {
   play: Smartphone,
 };
 
-function providerName(p: StoreProvider) {
-  return PROVIDER_LABEL[p];
-}
+const PROVIDER_ORDER: StoreProvider[] = ["itch", "steam", "play"];
 
-// v0.8.5 — Smart panel visibility.
-//
-// Before, every sub-panel rendered regardless of which stores the user
-// had actually connected, leaving a tab full of "no data yet" cards
-// and platform-specific widgets (Mobile Growth) on workspaces with no
-// Google Play binding. The helper below collapses that to a single
-// rule: each panel declares which stores can produce its data; if
-// none of those stores is bound anywhere in the workspace, the panel
-// is removed from the DOM (no empty container, no reserved space).
-//
-// `any` here means the panel works from any provider's data — it
-// only needs SOMETHING connected. The empty-state branch above
-// already handles "no provider at all".
 export type StorePanelId =
   | "ccu"
   | "mobileGrowth"
@@ -89,6 +88,7 @@ export type StorePanelId =
   | "leaderboard"
   | "globalStats";
 
+/** Which panels have a possible data source, given the connected stores. */
 export function getPanelVisibility(
   panelId: StorePanelId,
   conn: { hasSteam: boolean; hasItch: boolean; hasPlay: boolean },
@@ -112,14 +112,13 @@ export function getPanelVisibility(
 function shortError(err?: string) {
   if (!err) return "?";
   const text = err.replace(/^Error:?\s*/i, "");
-  return text.length > 60 ? `${text.slice(0, 57)}…` : text;
+  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
 }
 
-function relativeTime(iso: string, language: string): string {
-  const ts = Date.parse(iso);
+function relativeTime(iso: string | number, language: string): string {
+  const ts = typeof iso === "number" ? iso : Date.parse(iso);
   if (Number.isNaN(ts)) return "";
-  const diffMs = Date.now() - ts;
-  const minutes = Math.floor(diffMs / 60000);
+  const minutes = Math.floor((Date.now() - ts) / 60000);
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
   const tr = language === "tr";
@@ -131,51 +130,116 @@ function relativeTime(iso: string, language: string): string {
   return tr ? `${months} ay önce` : `${months}mo ago`;
 }
 
+function localeOf(language: string): string {
+  switch (language) {
+    case "tr": return "tr-TR";
+    case "fr": return "fr-FR";
+    case "es": return "es-ES";
+    default: return "en-US";
+  }
+}
+
+/** The user-chosen accent (Settings → Appearance), read once per mount. */
+function useAccentColor(): string {
+  const [accent, setAccent] = useState("#a78bfa");
+  useEffect(() => {
+    const v = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+    if (v) setAccent(v);
+  }, []);
+  return accent;
+}
+
+// Each section animates on its own mount (sections that appear after the
+// first sync would otherwise miss a parent-driven stagger).
+const reveal = (order: number) => ({
+  initial: { opacity: 0, y: 10 },
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.28, delay: order * 0.05, ease: [0.25, 1, 0.5, 1] as const },
+});
+
+interface GameSummary {
+  gameId: string;
+  title: string;
+  cover: string | null;
+  providers: StoreProvider[];
+  totals: Record<MetricKey, number | null>;
+  /** downloads / views over the stores that report BOTH (Itch.io). */
+  downloadRate: number | null;
+  rating: number | null;
+  ratingCount: number;
+  currency: string | null;
+  errors: { provider: StoreProvider; message: string }[];
+}
+
+interface CompareItem {
+  id: string;
+  name: string;
+  providers: StoreProvider[];
+  value: number;
+  gameId?: string;
+}
+
 export function StoreHub() {
-  const { games, language, ui, setWorkspaceTab } = useAppStore();
+  const { games, language, ui, setWorkspaceTab, setSelectedId } = useAppStore();
   const t = ui as unknown as Record<string, string>;
-  const tr = (en: string, t: string) => (language === "tr" ? t : en);
+  const tr = (en: string, trText: string) => (language === "tr" ? trText : en);
+  const accent = useAccentColor();
 
-  // Workspace-wide connection flags drive `getPanelVisibility`. We
-  // intentionally aggregate across ALL games — once even one game has
-  // bound Steam, the Steam-only panels make sense to show because
-  // their numbers can be non-empty.
-  const connectionFlags = useMemo(() => {
-    let hasSteam = false;
-    let hasItch = false;
-    let hasPlay = false;
-    for (const g of games) {
-      const m = g.storeMappings;
-      if (m?.steam?.id) hasSteam = true;
-      if (m?.itch?.id) hasItch = true;
-      if (m?.play?.id) hasPlay = true;
+  const locale = localeOf(language);
+  const nf = useMemo(() => new Intl.NumberFormat(locale), [locale]);
+  const compact = useMemo(
+    () => new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }),
+    [locale],
+  );
+  const pctFmt = useMemo(
+    () => new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }),
+    [locale],
+  );
+  // Full numbers below a million: the Turkish compact "59,7 B" (bin)
+  // reads as "billion" to many people.
+  const fmtNum = (n: number) => (Math.abs(n) >= 1_000_000 ? compact.format(n) : nf.format(n));
+  const fmtMoney = (n: number, cur: string | null, whole = false) => {
+    try {
+      const noCents = whole || n === 0 || Math.abs(n) >= 100000;
+      return new Intl.NumberFormat(locale, {
+        style: "currency",
+        currency: cur || "USD",
+        minimumFractionDigits: noCents ? 0 : undefined,
+        maximumFractionDigits: noCents ? 0 : 2,
+      }).format(n);
+    } catch {
+      return `${n.toFixed(2)} ${cur ?? "USD"}`;
     }
-    return { hasSteam, hasItch, hasPlay };
-  }, [games]);
-  const visible = (id: Parameters<typeof getPanelVisibility>[0]) =>
-    getPanelVisibility(id, connectionFlags);
+  };
+  const fmtDec = (n: number, digits: number) =>
+    new Intl.NumberFormat(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(n);
 
-  const mappedTargets = useMemo(() => {
-    const out: { gameId: string; title: string; provider: StoreProvider; id: string }[] = [];
-    for (const g of games) {
-      const m = g.storeMappings ?? {};
-      if (m.steam?.id) out.push({ gameId: g.id, title: g.title, provider: "steam", id: m.steam.id });
-      if (m.itch?.id) out.push({ gameId: g.id, title: g.title, provider: "itch", id: m.itch.id });
-      if (m.play?.id) out.push({ gameId: g.id, title: g.title, provider: "play", id: m.play.id });
-    }
-    return out;
-  }, [games]);
+  const metricLabel: Record<CompareKey, string> = {
+    views: tr("Page views", "Sayfa görüntülenme"),
+    downloads: tr("Downloads", "İndirme"),
+    purchases: tr("Purchases", "Satış"),
+    earnings: tr("Revenue", "Gelir"),
+    wishlist: tr("Wishlists", "İstek listesi"),
+    currentPlayers: tr("Playing now", "Şu an oynayan"),
+    rating: tr("Rating", "Puan"),
+  };
 
-  const [rows, setRows] = useState<AggregateRow[]>([]);
+  const mappedTargets = useMemo(() => mappedStoreTargets(games), [games]);
+
+  // Numbers already fetched this session (by an earlier visit or the
+  // background sync) show immediately; a refresh follows.
+  const [rows, setRows] = useState<AggregateRow[]>(() => cachedRows(mappedTargets)?.rows ?? []);
   const [loading, setLoading] = useState(false);
-  const [errorBanner, setErrorBanner] = useState<string>("");
-  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
-  const [justSynced, setJustSynced] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(() => cachedRows(mappedTargets)?.at ?? null);
+  const [history, setHistory] = useState<StoreSnapshot[]>(() => loadHistory());
+  const [trendMetric, setTrendMetric] = useState<MetricKey>("downloads");
+  const [compareMode, setCompareMode] = useState<"games" | "stores">("games");
+  const [compareMetric, setCompareMetric] = useState<CompareKey>("downloads");
   const [, setTick] = useState(0);
 
-  // Re-render every 30s so "5m ago" relative timestamps stay accurate
+  // Keep "5 min ago" labels honest.
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 30000);
+    const id = setInterval(() => setTick((n) => n + 1), 30000);
     return () => clearInterval(id);
   }, []);
 
@@ -185,64 +249,11 @@ export function StoreHub() {
       return;
     }
     setLoading(true);
-    setErrorBanner("");
-
-    const results = await Promise.all(
-      mappedTargets.map(async (target): Promise<AggregateRow> => {
-        try {
-          const data = await fetchStoreData(target.provider, target.id);
-          return {
-            gameId: target.gameId,
-            title: target.title,
-            provider: target.provider,
-            views: data.views ?? 0,
-            downloads: data.downloads ?? 0,
-            earnings: data.earnings ?? 0,
-            currency: data.currency ?? null,
-            currentPlayers: data.currentPlayers ?? 0,
-            ratingAverage: data.ratingAverage ?? null,
-            ratingCount: data.ratingCount ?? null,
-            lastNewsTitle: data.lastNewsTitle ?? null,
-            lastNewsUrl: data.lastNewsUrl ?? null,
-            lastNewsAt: data.lastNewsAt ?? null,
-            activeInstalls: data.activeInstalls ?? null,
-            uninstalls: data.uninstalls ?? null,
-          };
-        } catch (err) {
-          return {
-            gameId: target.gameId,
-            title: target.title,
-            provider: target.provider,
-            views: 0,
-            downloads: 0,
-            earnings: 0,
-            currency: null,
-            currentPlayers: 0,
-            ratingAverage: null,
-            ratingCount: null,
-            lastNewsTitle: null,
-            lastNewsUrl: null,
-            lastNewsAt: null,
-            activeInstalls: null,
-            uninstalls: null,
-            error: String(err),
-          };
-        }
-      })
-    );
-
+    const results = await syncTargets(mappedTargets);
     setRows(results);
-    const failed = results.filter((r) => r.error);
-    if (failed.length > 0) {
-      const summary = failed
-        .map((r) => `${providerName(r.provider)}: ${shortError(r.error)}`)
-        .join(" · ");
-      setErrorBanner(summary);
-    }
+    setHistory(loadHistory());
     setLoading(false);
     setLastSyncAt(Date.now());
-    setJustSynced(true);
-    setTimeout(() => setJustSynced(false), 3000);
   };
 
   useEffect(() => {
@@ -250,817 +261,655 @@ export function StoreHub() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mappedTargets.length]);
 
-  const totals = useMemo(() => {
-    return rows.reduce(
-      (acc, r) => {
-        acc.views += r.views;
-        acc.downloads += r.downloads;
-        acc.earnings += r.earnings;
-        acc.currentPlayers += r.currentPlayers;
-        if (!acc.currency && r.currency) acc.currency = r.currency;
-        return acc;
-      },
-      { views: 0, downloads: 0, earnings: 0, currentPlayers: 0, currency: null as string | null }
-    );
-  }, [rows]);
-
-  const topRated = useMemo(() => {
-    return (
-      rows
-        .filter((r) => r.ratingAverage != null && (r.ratingCount ?? 0) > 0)
-        .sort((a, b) => (b.ratingAverage ?? 0) - (a.ratingAverage ?? 0))[0] ?? null
-    );
-  }, [rows]);
-
-  const newsHighlight = useMemo(() => {
-    return (
-      rows
-        .filter((r) => r.lastNewsTitle && r.lastNewsAt)
-        .sort((a, b) => (b.lastNewsAt ?? "").localeCompare(a.lastNewsAt ?? ""))[0] ?? null
-    );
-  }, [rows]);
-
-  const leaderboard = useMemo(
-    () =>
-      rows
-        .map((r) => ({
-          name: r.title.length > 16 ? `${r.title.slice(0, 15)}…` : r.title,
-          provider: r.provider,
-          views: r.views,
-          downloads: r.downloads,
-        }))
-        .sort((a, b) => b.downloads - a.downloads || b.views - a.views),
-    [rows]
-  );
-
-  const revenueByStore = useMemo(() => {
-    const map = new Map<StoreProvider, number>();
-    for (const r of rows) {
-      if (r.earnings <= 0) continue;
-      map.set(r.provider, (map.get(r.provider) ?? 0) + r.earnings);
-    }
-    return Array.from(map.entries()).map(([provider, value]) => ({
-      provider,
-      name: PROVIDER_LABEL[provider],
-      value: Number(value.toFixed(2)),
-    }));
-  }, [rows]);
-
-  // ── Community feedback aggregate (rating-weighted) ──────────────────────────
-  const community = useMemo(() => {
-    let weightedSum = 0;
-    let totalCount = 0;
-    const perProvider = new Map<StoreProvider, number>();
-    for (const r of rows) {
-      const count = r.ratingCount ?? 0;
-      if (count <= 0) continue;
-      if (r.ratingAverage != null) {
-        weightedSum += r.ratingAverage * count;
-      }
-      totalCount += count;
-      perProvider.set(r.provider, (perProvider.get(r.provider) ?? 0) + count);
-    }
-    const avg = totalCount > 0 ? weightedSum / totalCount : null;
-    let topProvider: StoreProvider | null = null;
-    let topProviderCount = 0;
-    for (const [p, c] of perProvider) {
-      if (c > topProviderCount) {
-        topProvider = p;
-        topProviderCount = c;
-      }
-    }
-    return { avg, totalCount, topProvider, topProviderCount };
-  }, [rows]);
-
-  // ── Mobile installs vs uninstalls ───────────────────────────────────────────
-  const mobileInsights = useMemo(() => {
-    const playRows = rows.filter((r) => r.provider === "play");
-    let installs = 0;
-    let uninstalls = 0;
-    for (const r of playRows) {
-      installs += r.activeInstalls ?? 0;
-      uninstalls += r.uninstalls ?? 0;
-    }
-    const total = installs + uninstalls;
-    return {
-      hasPlay: playRows.length > 0,
-      installs,
-      uninstalls,
-      retentionPct: total > 0 ? Math.round((installs / total) * 100) : null,
+  // Background sync (Settings → API keys → Sync interval) landed.
+  useEffect(() => {
+    const onSync = () => {
+      if (loading) return;
+      const hit = cachedRows(mappedTargets);
+      if (!hit) return;
+      setRows(hit.rows);
+      setLastSyncAt(hit.at);
+      setHistory(loadHistory());
     };
+    window.addEventListener("heravex:store-sync", onSync);
+    return () => window.removeEventListener("heravex:store-sync", onSync);
+  }, [mappedTargets, loading]);
+
+  // ── Derived data ──────────────────────────────────────────────────────
+  const okRows = useMemo(() => rows.filter((r) => !r.error), [rows]);
+  const failedRows = useMemo(() => rows.filter((r) => r.error), [rows]);
+
+  const totals = useMemo(() => {
+    const acc: Record<MetricKey, number> = { views: 0, downloads: 0, purchases: 0, earnings: 0, wishlist: 0, currentPlayers: 0 };
+    const reported = new Set<MetricKey>();
+    const currencies = new Set<string>();
+    let ratingWeighted = 0;
+    let ratingCount = 0;
+    for (const r of okRows) {
+      for (const k of METRIC_ORDER) {
+        const v = r[k];
+        if (v == null) continue;
+        reported.add(k);
+        acc[k] += v;
+      }
+      if (r.currency && n0(r.earnings) > 0) currencies.add(r.currency);
+      const c = r.ratingCount ?? 0;
+      if (c > 0 && r.ratingAverage != null) {
+        ratingWeighted += r.ratingAverage * c;
+        ratingCount += c;
+      }
+    }
+    // Before the first sync, availability comes from which stores are mapped.
+    if (okRows.length === 0) {
+      for (const m of mappedTargets) REPORTS[m.provider].forEach((k) => reported.add(k));
+    }
+    return {
+      ...acc,
+      reported,
+      currency: currencies.size > 0 ? Array.from(currencies)[0] : null,
+      mixedCurrency: currencies.size > 1,
+      rating: ratingCount > 0 ? ratingWeighted / ratingCount : null,
+      ratingCount,
+    };
+  }, [okRows, mappedTargets]);
+
+  const prev = useMemo(() => previousSnapshot(history), [history]);
+  const yesterday = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return dayKey(d);
+  }, []);
+
+  const formatMetric = (k: CompareKey, n: number, whole = false) =>
+    k === "earnings" ? fmtMoney(n, totals.currency, whole) : k === "rating" ? fmtDec(n, 1) : fmtNum(n);
+
+  const summaryMetrics = SUMMARY_PRIORITY.filter((k) => totals.reported.has(k)).slice(0, 3);
+  const trendOptions = TREND_METRICS.filter((k) => totals.reported.has(k));
+  useEffect(() => {
+    if (trendOptions.length > 0 && !trendOptions.includes(trendMetric)) setTrendMetric(trendOptions[0]);
+  }, [trendOptions, trendMetric]);
+
+  const gameSummaries = useMemo<GameSummary[]>(() => {
+    const byGame = new Map<string, GameSummary & { _rw: number; _views: number; _dl: number }>();
+    for (const r of rows) {
+      let g = byGame.get(r.gameId);
+      if (!g) {
+        g = {
+          gameId: r.gameId,
+          title: r.title,
+          cover: r.cover,
+          providers: [],
+          totals: { views: null, downloads: null, purchases: null, earnings: null, wishlist: null, currentPlayers: null },
+          downloadRate: null,
+          rating: null,
+          ratingCount: 0,
+          currency: null,
+          errors: [],
+          _rw: 0,
+          _views: 0,
+          _dl: 0,
+        };
+        byGame.set(r.gameId, g);
+      }
+      g.providers.push(r.provider);
+      if (r.error) {
+        g.errors.push({ provider: r.provider, message: shortError(r.error) });
+        continue;
+      }
+      for (const k of METRIC_ORDER) {
+        const v = r[k];
+        if (v != null) g.totals[k] = n0(g.totals[k]) + v;
+      }
+      if (r.views != null && r.views > 0 && r.downloads != null) {
+        g._views += r.views;
+        g._dl += r.downloads;
+      }
+      const c = r.ratingCount ?? 0;
+      if (c > 0 && r.ratingAverage != null) {
+        g._rw += r.ratingAverage * c;
+        g.ratingCount += c;
+      }
+      if (!g.currency && r.currency && n0(r.earnings) > 0) g.currency = r.currency;
+    }
+    const list = Array.from(byGame.values()).map(({ _rw, _views, _dl, ...g }) => ({
+      ...g,
+      providers: PROVIDER_ORDER.filter((p) => g.providers.includes(p)),
+      downloadRate: _views > 0 ? _dl / _views : null,
+      rating: g.ratingCount > 0 ? _rw / g.ratingCount : null,
+    }));
+    const score = (g: GameSummary) =>
+      n0(g.totals.downloads) * 1e6 + n0(g.totals.wishlist) * 1e3 + n0(g.totals.views);
+    return list.sort((a, b) => score(b) - score(a));
   }, [rows]);
 
-  const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
-  const money = (n: number, cur: string | null) =>
-    cur ? `${n.toFixed(2)} ${cur}` : `$${n.toFixed(2)}`;
+  const storeSummaries = useMemo(() => {
+    return PROVIDER_ORDER.flatMap((provider) => {
+      const own = rows.filter((r) => r.provider === provider);
+      if (own.length === 0) return [];
+      const ok = own.filter((r) => !r.error);
+      const sum = (k: MetricKey) => ok.reduce((a, r) => a + n0(r[k]), 0);
+      let rw = 0;
+      let rc = 0;
+      for (const r of ok) {
+        const c = r.ratingCount ?? 0;
+        if (c > 0 && r.ratingAverage != null) {
+          rw += r.ratingAverage * c;
+          rc += c;
+        }
+      }
+      const news = ok
+        .filter((r) => r.lastNewsTitle && r.lastNewsAt)
+        .sort((a, b) => (b.lastNewsAt ?? "").localeCompare(a.lastNewsAt ?? ""))[0] ?? null;
+      return [{
+        provider,
+        games: own.length,
+        failed: own.length - ok.length,
+        totals: Object.fromEntries(
+          METRIC_ORDER.map((k) => [k, REPORTS[provider].has(k) && ok.length > 0 ? sum(k) : null]),
+        ) as Record<MetricKey, number | null>,
+        rating: rc > 0 ? rw / rc : null,
+        news,
+        installs: ok.reduce((a, r) => a + n0(r.activeInstalls), 0),
+        uninstalls: ok.reduce((a, r) => a + n0(r.uninstalls), 0),
+      }];
+    });
+  }, [rows]);
 
-  // ── EMPTY STATE ────────────────────────────────────────────────────────────
+  // ── Comparison ────────────────────────────────────────────────────────
+  const compareSource = compareMode === "stores" && storeSummaries.length > 1 ? "stores" : "games";
+  const compareOptions = COMPARE_METRICS.filter((k) => (k === "rating" ? totals.rating != null : totals.reported.has(k)));
+  useEffect(() => {
+    if (compareOptions.length > 0 && !compareOptions.includes(compareMetric)) setCompareMetric(compareOptions[0]);
+  }, [compareOptions, compareMetric]);
+
+  const compareRaw: (Omit<CompareItem, "value"> & { value: number | null })[] =
+    compareSource === "games"
+      ? gameSummaries.map((g) => ({
+          id: g.gameId,
+          name: g.title,
+          providers: g.providers,
+          gameId: g.gameId,
+          value: compareMetric === "rating" ? g.rating : g.totals[compareMetric],
+        }))
+      : storeSummaries.map((s) => ({
+          id: s.provider,
+          name: PROVIDER_LABEL[s.provider],
+          providers: [s.provider],
+          gameId: undefined,
+          value: compareMetric === "rating" ? s.rating : s.totals[compareMetric],
+        }));
+  const compareItems = compareRaw
+    .filter((i): i is CompareItem => i.value != null)
+    .sort((a, b) => b.value - a.value);
+  const compareTotal = compareItems.reduce((a, i) => a + i.value, 0);
+  const compareMax = compareMetric === "rating" ? 5 : compareItems[0]?.value ?? 0;
+  const additive = compareMetric !== "rating";
+
+  const openGame = (gameId: string) => {
+    setSelectedId(gameId);
+    setWorkspaceTab("library");
+  };
+
+  const connected = PROVIDER_ORDER.filter((p) => mappedTargets.some((m) => m.provider === p));
+  const notConnected = PROVIDER_ORDER.filter((p) => !connected.includes(p));
+
+  // ── EMPTY STATE: nothing mapped yet ──────────────────────────────────
   if (mappedTargets.length === 0 && !loading) {
     return (
-      <motion.div
-        className="page-fade storehub-wrapper"
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-      >
-        <div className="storehub-backdrop" aria-hidden="true">
-          <div className="storehub-orb storehub-orb-1" />
-          <div className="storehub-orb storehub-orb-2" />
-        </div>
-        <section className="panel storehub-empty">
-          <div className="storehub-empty-icon">
-            <Link2 size={32} strokeWidth={1.9} />
-          </div>
-          <p className="eyebrow">{tr("THE NEXUS", "MERKEZ")}</p>
-          <h2 style={{ margin: "4px 0 8px" }}>
-            {tr("Map a game to start collecting data", "Veri toplamak için bir oyun eşleştir")}
-          </h2>
-          <p className="section-copy" style={{ maxWidth: 460, textAlign: "center" }}>
-            {tr(
-              "Open any project, jump to its Store Sync tab, and connect it to Steam, Itch.io or Google Play. The Nexus aggregates everything in real time.",
-              "Bir projeyi aç, Store Sync sekmesine git ve Steam, Itch.io veya Google Play'e bağla. Merkez verileri anlık olarak toplar."
-            )}
-          </p>
-          {/* v0.8.5 — chips became actionable buttons that jump to
-              the Identity tab where API keys live. The label was kept
-              short because three buttons in a row already communicate
-              what each one does. */}
-          <div className="storehub-empty-providers">
-            {(["steam", "itch", "play"] as StoreProvider[]).map((p) => {
-              const Icon = PROVIDER_ICON[p];
-              return (
-                <button
-                  key={p}
-                  type="button"
-                  className="storehub-empty-chip storehub-empty-chip-btn"
-                  style={{ borderColor: PROVIDER_COLOR[p] }}
-                  onClick={() => setWorkspaceTab("profile")}
-                  title={tr(
-                    `Open Identity to connect ${PROVIDER_LABEL[p]}`,
-                    `${PROVIDER_LABEL[p]} bağlamak için Kimlik sekmesini aç`,
-                  )}
-                >
-                  <Icon size={14} style={{ color: PROVIDER_COLOR[p] }} />
-                  <span>
-                    {tr(`Connect ${PROVIDER_LABEL[p]}`, `${PROVIDER_LABEL[p]} Bağla`)}
-                  </span>
-                </button>
-              );
-            })}
+      <motion.div className="page-fade sh-page" {...reveal(0)}>
+        <section className="panel storehub-hero sh-hero">
+          <div className="storehub-hero-icon"><Store size={26} strokeWidth={2} /></div>
+          <div className="sh-hero-text">
+            <p className="eyebrow">{tr("STORE CENTER", "MAĞAZA MERKEZİ")}</p>
+            <h2>{tr("Connect a game to a store", "Bir oyunu mağazaya bağla")}</h2>
+            <ol className="sh-empty-steps">
+              <li>{tr("Add your store API keys in Settings.", "Mağaza API anahtarlarını Ayarlar'a ekle.")}</li>
+              <li>{tr("Open a game in the Library and link its store page.", "Kütüphane'de bir oyunu aç ve mağaza sayfasını bağla.")}</li>
+              <li>{tr("Views, downloads and revenue appear here.", "Görüntülenme, indirme ve gelir burada görünür.")}</li>
+            </ol>
+            <div className="sh-empty-actions">
+              <button type="button" className="primary-button compact-button" onClick={() => setWorkspaceTab("profile")}>
+                <Link2 size={14} /> {tr("Add API keys", "API anahtarı ekle")}
+              </button>
+              <button type="button" className="secondary-button compact-button" onClick={() => setWorkspaceTab("library")}>
+                {tr("Open library", "Kütüphaneyi aç")}
+              </button>
+            </div>
           </div>
         </section>
       </motion.div>
     );
   }
 
-  return (
-    <motion.div
-      className="page-fade storehub-wrapper"
-      initial="hidden"
-      animate="show"
-      variants={{ show: { transition: { staggerChildren: 0.05 } } }}
-    >
-      <div className="storehub-backdrop" aria-hidden="true">
-        <div className="storehub-orb storehub-orb-1" />
-        <div className="storehub-orb storehub-orb-2" />
+  const firstLoad = loading && rows.length === 0;
+  const showTrend = history.length >= 2 && trendOptions.length > 0;
+  const chartData = history.map((s) => ({
+    label: `${s.day.slice(8, 10)}.${s.day.slice(5, 7)}`,
+    value: s[trendMetric] ?? 0,
+  }));
+  const statCount = summaryMetrics.length + (totals.rating != null ? 1 : 0);
+
+  const changeOf = (k: MetricKey): { tone: "neutral" | "success" | "danger"; text: string; up?: boolean } => {
+    if (!prev) return { tone: "neutral", text: tr("Change shows tomorrow", "Değişim yarın görünür") };
+    const diff = totals[k] - prev[k];
+    const since = prev.day === yesterday
+      ? tr("since yesterday", "dünden beri")
+      : tr(`since ${prev.day.slice(8, 10)}.${prev.day.slice(5, 7)}`, `${prev.day.slice(8, 10)}.${prev.day.slice(5, 7)} tarihinden beri`);
+    if (diff === 0) return { tone: "neutral", text: tr(`No change ${since}`, `${since.charAt(0).toLocaleUpperCase("tr")}${since.slice(1)} değişmedi`) };
+    return {
+      tone: diff > 0 ? "success" : "danger",
+      up: diff > 0,
+      text: `${diff > 0 ? "+" : "-"}${formatMetric(k, Math.abs(diff))} ${since}`,
+    };
+  };
+
+  const panelHead = (Icon: typeof Store, eyebrow: string, title: string, right?: ReactNode) => (
+    <div className="panel-head sh-panel-head">
+      <div className="sh-head-title">
+        <div className="financial-report-head-icon"><Icon size={18} strokeWidth={2.1} /></div>
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h3>{title}</h3>
+        </div>
       </div>
+      {right}
+    </div>
+  );
 
-      <motion.section
-        className="panel storehub-hero"
-        variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.32 } } }}
-      >
-        <div className="storehub-hero-icon">
-          <Store size={26} strokeWidth={2} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <p className="eyebrow">{tr("THE NEXUS", "MERKEZ")}</p>
-          <h2 style={{ margin: "2px 0 6px" }}>{t.storeHubTitle ?? "Global Store Analytics"}</h2>
-          <p className="section-copy" style={{ maxWidth: 540 }}>
-            {tr(
-              "Live wishlists, downloads and revenue across every store you sync. Mapped projects feed this dashboard automatically.",
-              "Senkronize ettiğin tüm mağazalardan wishlist, indirme ve gelir verisinin canlı görünümü. Eşleştirdiğin projeler bu dashboard'u otomatik besliyor."
-            )}
-          </p>
-        </div>
-        <button
-          className={`secondary-button compact-button storehub-refresh-btn${justSynced ? " storehub-refresh-success" : ""}`}
-          onClick={() => void fetchAll()}
-          disabled={loading}
-          title={tr("Refresh", "Yenile")}
-        >
-          {loading ? (
-            <>
-              <RefreshCw size={14} className="spin" style={{ marginRight: 6 }} />
-              {tr("Syncing…", "Yenileniyor…")}
-            </>
-          ) : justSynced ? (
-            <>
-              <Check size={14} style={{ marginRight: 6, color: "#34d399" }} />
-              {tr("Last sync: just now", "Son sync: az önce")}
-            </>
-          ) : (
-            <>
-              <RefreshCw size={14} style={{ marginRight: 6 }} />
-              {tr("Refresh", "Yenile")}
-            </>
-          )}
-        </button>
-      </motion.section>
-
-      {errorBanner && (
-        <motion.div
-          className="storehub-banner"
-          initial={{ opacity: 0, y: -4 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
-          <AlertTriangle size={14} />
-          <span>{errorBanner}</span>
-        </motion.div>
-      )}
-
-      {/* ── TOP: 4 GLOBAL METRIC CARDS ──────────────────────────────────────── */}
-      <motion.section
-        className="storehub-grid storehub-grid-4"
-        variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.32 } } }}
-      >
-        {loading && rows.length === 0 ? (
-          <>
-            <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
-          </>
-        ) : (() => {
-          const syncLabel = lastSyncAt
-            ? relativeTime(new Date(lastSyncAt).toISOString(), language)
-            : "";
-          const emptyNote = tr("no data yet", "henüz veri yok");
-          return (
-            <>
-              <GlobalStat
-                icon={Eye} label={tr("Total Views", "Toplam Görüntülenme")}
-                value={totals.views > 0 ? fmt(totals.views) : "—"}
-                isEmpty={totals.views === 0} emptyNote={emptyNote}
-                lastSync={syncLabel} accent="#4f8cff"
-              />
-              <GlobalStat
-                icon={Download} label={tr("Total Downloads / Sales", "Toplam İndirme / Satış")}
-                value={totals.downloads > 0 ? fmt(totals.downloads) : "—"}
-                isEmpty={totals.downloads === 0} emptyNote={emptyNote}
-                lastSync={syncLabel} accent="#34d399"
-              />
-              <GlobalStat
-                icon={DollarSign} label={tr("Global Revenue", "Global Gelir")}
-                value={totals.earnings > 0 ? money(totals.earnings, totals.currency) : "—"}
-                isEmpty={totals.earnings === 0} emptyNote={emptyNote}
-                lastSync={syncLabel} accent="#facc15"
-              />
-              {/* CCU only makes sense when at least one Steam mapping
-                  exists — Itch and Play have no concurrent-player
-                  concept. Drop the card from the row rather than
-                  showing a permanent em-dash. */}
-              {visible("ccu") && (
-                <GlobalStat
-                  icon={Users} label={tr("Live Players (CCU)", "Anlık Oyuncu (CCU)")}
-                  value={totals.currentPlayers > 0 ? fmt(totals.currentPlayers) : "—"}
-                  isEmpty={totals.currentPlayers === 0} emptyNote={emptyNote}
-                  lastSync={syncLabel} accent="#f87171"
-                />
-              )}
-            </>
-          );
-        })()}
-      </motion.section>
-
-      {/* ── MIDDLE ROW: LEADERBOARD | STUDIO PULSE ──────────────────────────── */}
-      <motion.section
-        className="storehub-row-2"
-        variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.32 } } }}
-      >
-        {/* Left: Leaderboard */}
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">{tr("LEADERBOARD", "LİDER TABLOSU")}</p>
-              <h3>{tr("Which project carries the studio?", "Hangi proje stüdyoyu sırtlıyor?")}</h3>
-            </div>
-          </div>
-
-          {loading && rows.length === 0 ? (
-            <SkeletonChart />
-          ) : leaderboard.length === 0 ? (
-            <div className="chart-empty-hint">
-              {tr("No engagement data yet.", "Henüz etkileşim verisi yok.")}
-            </div>
-          ) : (
-            <div style={{ height: 280, marginTop: 10 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={leaderboard} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
-                  <XAxis dataKey="name" stroke="rgba(255,255,255,0.25)" fontSize={11} tickLine={false} axisLine={false} />
-                  <YAxis hide />
-                  <RechartsTooltip
-                    cursor={{ fill: "rgba(255,255,255,0.04)" }}
-                    contentStyle={{ backgroundColor: "#1e293b", color: "#f8fafc", border: "none", borderRadius: 8, fontSize: 12 }}
-                    itemStyle={{ color: "#cbd5e1" }}
-                    labelStyle={{ color: "#f8fafc" }}
-                  />
-                  <Bar dataKey="downloads" name={tr("Downloads", "İndirme")} radius={[6, 6, 0, 0]} barSize={20}>
-                    {leaderboard.map((row, i) => (
-                      <Cell
-                        key={`d-${i}`}
-                        fill={leaderboardColor(i, PROVIDER_COLOR[row.provider] ?? PALETTE[i % PALETTE.length])}
-                        fillOpacity={0.92}
-                      />
-                    ))}
-                  </Bar>
-                  <Bar dataKey="views" name={tr("Views", "Görüntülenme")} radius={[6, 6, 0, 0]} barSize={20}>
-                    {leaderboard.map((row, i) => (
-                      <Cell
-                        key={`v-${i}`}
-                        fill={leaderboardColor(i, PROVIDER_COLOR[row.provider] ?? PALETTE[i % PALETTE.length])}
-                        fillOpacity={0.45}
-                      />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          {leaderboard.length > 0 && (
-            <div className="storehub-provider-row">
-              {leaderboard.map((row, i) => {
-                const Icon = PROVIDER_ICON[row.provider];
+  return (
+    <MotionConfig reducedMotion="user">
+      <div className="page-fade sh-page">
+        {/* ── 1. Hero ─────────────────────────────────────────────── */}
+        <motion.section className="panel storehub-hero sh-hero" {...reveal(0)}>
+          <div className="storehub-hero-icon"><Store size={26} strokeWidth={2} /></div>
+          <div className="sh-hero-text">
+            <p className="eyebrow">{tr("STORE CENTER", "MAĞAZA MERKEZİ")}</p>
+            <h2>{t.storeHubTitle ?? tr("Store analytics", "Mağaza analitikleri")}</h2>
+            <div className="sh-hero-stores">
+              {connected.map((p) => {
+                const Icon = PROVIDER_ICON[p];
+                const n = new Set(mappedTargets.filter((m) => m.provider === p).map((m) => m.gameId)).size;
                 return (
-                  <div key={`legend-${i}`} className="storehub-provider-chip">
-                    <Icon size={12} strokeWidth={2} style={{ color: PROVIDER_COLOR[row.provider] }} />
-                    <span>{row.name}</span>
-                    <span className="storehub-provider-meta">{PROVIDER_LABEL[row.provider]}</span>
-                  </div>
+                  <span key={p} className="sh-store-tag">
+                    <Icon size={12} style={{ color: PROVIDER_COLOR[p] }} />
+                    {PROVIDER_LABEL[p]}
+                    <small>{tr(`${n} ${n === 1 ? "game" : "games"}`, `${n} oyun`)}</small>
+                  </span>
                 );
               })}
-            </div>
-          )}
-        </section>
-
-        {/* Right: Studio Pulse (CCU + Top Rated) */}
-        <section className="panel storehub-side-pulse">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">{tr("STUDIO PULSE", "STÜDYO NABZI")}</p>
-              <h3>{tr("Live signals", "Canlı sinyaller")}</h3>
+              {notConnected.map((p) => (
+                <button key={p} type="button" className="sh-store-tag is-add" onClick={() => setWorkspaceTab("profile")}>
+                  <Plus size={12} />
+                  {tr(`Connect ${PROVIDER_LABEL[p]}`, `${PROVIDER_LABEL[p]} bağla`)}
+                </button>
+              ))}
             </div>
           </div>
-
-          <div className="pulse-stack">
-            {/* Live Players inside Studio Pulse — same Steam-only
-                rationale as the GlobalStat above. Hide the card when
-                no Steam mapping; Top Rated below still renders. */}
-            {visible("ccu") && (
-              <div className={`daily-pulse-card ${totals.currentPlayers > 0 ? "" : "pulse-dim"}`}>
-                <div className="daily-pulse-icon">
-                  <Activity size={20} strokeWidth={2.1} />
-                </div>
-                <div>
-                  <p className="eyebrow">{tr("LIVE PLAYERS", "ANLIK OYUNCU")}</p>
-                  <h3 style={{ margin: "2px 0 4px" }}>
-                    {totals.currentPlayers > 0
-                      ? tr(
-                          `${totals.currentPlayers.toLocaleString()} playing right now`,
-                          `Şu an ${totals.currentPlayers.toLocaleString()} kişi oynuyor`
-                        )
-                      : tr("No live Steam data yet", "Henüz Steam canlı verisi yok")}
-                  </h3>
-                  <p className="section-copy" style={{ margin: 0 }}>
-                    {tr(
-                      "Concurrent player count from Steam, summed across mapped projects.",
-                      "Eşleşmiş projelerin Steam anlık oyuncu sayılarının toplamı."
-                    )}
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <div className={`daily-pulse-card top-rated ${topRated ? "" : "pulse-dim"}`}>
-              <div className="daily-pulse-icon">
-                <Star size={20} strokeWidth={2.1} />
-              </div>
-              <div>
-                <p className="eyebrow">{tr("TOP RATED", "EN YÜKSEK PUAN")}</p>
-                {topRated ? (
-                  <>
-                    <h3 style={{ margin: "2px 0 4px" }}>
-                      {topRated.title} · ★ {(topRated.ratingAverage ?? 0).toFixed(2)}
-                    </h3>
-                    <p className="section-copy" style={{ margin: 0 }}>
-                      {`${PROVIDER_LABEL[topRated.provider]} · ${topRated.ratingCount ?? 0} ${tr("ratings", "oy")}`}
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <h3 style={{ margin: "2px 0 4px" }}>
-                      {tr("No ratings yet", "Henüz puan yok")}
-                    </h3>
-                    <p className="section-copy" style={{ margin: 0 }}>
-                      {tr("Mappings with at least one rating will appear here.", "En az bir oy almış eşleşmeler burada görünecek.")}
-                    </p>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-      </motion.section>
-
-      {/* ── REVENUE PIE + COMMUNITY FEEDBACK ───────────────────────────────── */}
-      <motion.section
-        className="storehub-row-2"
-        variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.32 } } }}
-      >
-        {/* Revenue per store */}
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">{tr("REVENUE PER STORE", "MAĞAZA BAŞINA GELİR")}</p>
-              <h3>{tr("Where the money comes from", "Para hangi mağazadan geliyor")}</h3>
-            </div>
-          </div>
-
-          {revenueByStore.length === 0 ? (
-            <div className="chart-empty-hint">
-              {tr("No revenue captured yet.", "Henüz gelir yakalanmadı.")}
-            </div>
-          ) : (
-            <div style={{ height: 260, marginTop: 10 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={revenueByStore}
-                    dataKey="value"
-                    nameKey="name"
-                    innerRadius={60}
-                    outerRadius={100}
-                    paddingAngle={2}
-                    stroke="rgba(8,13,22,0.95)"
-                    strokeWidth={2}
-                  >
-                    {revenueByStore.map((row, i) => (
-                      <Cell key={i} fill={PROVIDER_COLOR[row.provider]} />
-                    ))}
-                  </Pie>
-                  <RechartsTooltip
-                    contentStyle={{ backgroundColor: "#1e293b", color: "#f8fafc", border: "none", borderRadius: 8, fontSize: 12 }}
-                    itemStyle={{ color: "#cbd5e1" }}
-                    labelStyle={{ color: "#f8fafc" }}
-                    formatter={(v: unknown) => `$${Number(v).toFixed(2)}`}
-                  />
-                  <Legend
-                    layout="vertical"
-                    verticalAlign="middle"
-                    align="right"
-                    iconType="circle"
-                    formatter={(value: string) => (
-                      <span style={{ color: "#dce7f6", fontSize: 12 }}>{value}</span>
-                    )}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </section>
-
-        {/* Community feedback */}
-        <CommunityFeedback
-          avg={community.avg}
-          total={community.totalCount}
-          topProvider={community.topProvider}
-          topProviderCount={community.topProviderCount}
-          tr={tr}
-        />
-      </motion.section>
-
-      {/* ── ACTIVITY FEED + MOBILE INSIGHTS ──────────────────────────────────
-       *
-       * v0.8.5: each card is platform-specific (Steam community feed
-       * and Google Play installs/uninstalls). We hide the whole row
-       * when neither is relevant so it doesn't leave a blank gap. */}
-      {(visible("steamNews") || visible("mobileGrowth")) && (
-        <motion.section
-          className="storehub-row-2"
-          variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0, transition: { duration: 0.32 } } }}
-        >
-          {visible("steamNews") && (
-            <ActivityFeed news={newsHighlight} language={language} tr={tr} onSync={() => void fetchAll()} loading={loading} />
-          )}
-          {visible("mobileGrowth") && (
-            <MobileInsights insights={mobileInsights} tr={tr} />
-          )}
-        </motion.section>
-      )}
-    </motion.div>
-  );
-}
-
-// ── Sub components ──────────────────────────────────────────────────────────
-
-function GlobalStat({
-  icon: Icon, label, value, accent, isEmpty, emptyNote, lastSync,
-}: {
-  icon: typeof Store;
-  label: string;
-  value: string;
-  accent: string;
-  isEmpty?: boolean;
-  emptyNote?: string;
-  lastSync?: string;
-}) {
-  return (
-    <div className="hero-stat-card storehub-stat" style={{ "--hero-accent": accent } as React.CSSProperties}>
-      <div className="hero-stat-icon">
-        <Icon size={22} strokeWidth={2} />
-      </div>
-      <div className="hero-stat-body">
-        <span className="hero-stat-label">{label}</span>
-        <strong className="hero-stat-value">{value}</strong>
-        {isEmpty && emptyNote && (
-          <span className="hero-stat-empty-note">{emptyNote}</span>
-        )}
-      </div>
-      {lastSync && (
-        <span className="hero-stat-timestamp" title={lastSync}>
-          {lastSync}
-        </span>
-      )}
-      <div className="hero-stat-bar" />
-    </div>
-  );
-}
-
-function SkeletonCard() {
-  return (
-    <div className="skeleton-card">
-      <div className="skeleton skeleton-icon" />
-      <div className="skeleton-body">
-        <div className="skeleton skeleton-line skeleton-line-sm" />
-        <div className="skeleton skeleton-line skeleton-line-lg" />
-      </div>
-    </div>
-  );
-}
-
-function SkeletonChart() {
-  return (
-    <div className="skeleton-chart">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="skeleton skeleton-bar" style={{ height: `${30 + (i * 17) % 70}%` }} />
-      ))}
-    </div>
-  );
-}
-
-function CommunityFeedback({
-  avg, total, topProvider, topProviderCount, tr,
-}: {
-  avg: number | null;
-  total: number;
-  topProvider: StoreProvider | null;
-  topProviderCount: number;
-  tr: (en: string, t: string) => string;
-}) {
-  const stars = avg ?? 0;
-  const filled = Math.round(stars);
-  return (
-    <section className="panel community-panel">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">{tr("COMMUNITY FEEDBACK", "TOPLULUK GERİ BİLDİRİMİ")}</p>
-          <h3>{tr("How players feel about the studio", "Oyuncular stüdyo hakkında ne hissediyor")}</h3>
-        </div>
-      </div>
-
-      {total === 0 ? (
-        <div className="chart-empty-hint">
-          {tr(
-            "No ratings yet across mapped stores.",
-            "Eşleşmiş mağazalarda henüz puan yok."
-          )}
-        </div>
-      ) : (
-        <>
-          <div className="community-score">
-            <div className="community-stars-block">
-              <strong className="community-score-value">{stars.toFixed(2)}</strong>
-              <div className="community-stars" aria-label={`${stars.toFixed(2)} of 5`}>
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <Star
-                    key={i}
-                    size={18}
-                    fill={i < filled ? "#facc15" : "transparent"}
-                    stroke={i < filled ? "#facc15" : "#475569"}
-                    strokeWidth={1.6}
-                  />
-                ))}
-              </div>
-              <span className="community-stars-label">{tr("Studio rating", "Stüdyo puanı")}</span>
-            </div>
-
-            <div className="community-meta">
-              <div className="community-meta-row">
-                <MessageSquare size={14} strokeWidth={2} style={{ color: "#7DC2FF" }} />
-                <span>
-                  <strong>{total.toLocaleString()}</strong>{" "}
-                  {tr("total ratings", "toplam oy")}
-                </span>
-              </div>
-              {topProvider && (
-                <div className="community-top-provider" style={{ borderColor: PROVIDER_COLOR[topProvider] }}>
-                  {(() => {
-                    const Icon = PROVIDER_ICON[topProvider];
-                    return <Icon size={14} style={{ color: PROVIDER_COLOR[topProvider] }} />;
-                  })()}
-                  <span>
-                    {tr("Top reviewer platform", "En yorum yapan platform")}:{" "}
-                    <strong>{PROVIDER_LABEL[topProvider]}</strong>
-                  </span>
-                  <span className="community-top-count">
-                    {topProviderCount.toLocaleString()}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-function ActivityFeed({
-  news, language, tr, onSync, loading,
-}: {
-  news: AggregateRow | null;
-  language: string;
-  tr: (en: string, t: string) => string;
-  onSync: () => void;
-  loading: boolean;
-}) {
-  const openUrl = (url: string) => {
-    if (!url) return;
-    window.open(url, "_blank", "noopener,noreferrer");
-  };
-  return (
-    <section className="panel activity-feed-panel">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">{tr("ACTIVITY FEED", "AKTİVİTE AKIŞI")}</p>
-          <h3>{tr("Latest Updates", "Son Güncellemeler")}</h3>
-        </div>
-      </div>
-
-      {!news?.lastNewsTitle ? (
-        <div className="storehub-cta-empty">
-          <Newspaper size={48} strokeWidth={1.4} className="storehub-cta-icon" />
-          <p className="storehub-cta-msg">
-            {tr(
-              "No recent updates pulled from Steam yet.",
-              "Steam'den henüz güncelleme çekilmedi."
-            )}
-          </p>
-          <button
-            type="button"
-            className="storehub-cta-btn"
-            onClick={onSync}
-            disabled={loading}
-          >
-            <RefreshCw size={13} className={loading ? "spin" : ""} style={{ marginRight: 6 }} />
-            {tr("Sync Steam →", "Steam Senkronize Et →")}
-          </button>
-        </div>
-      ) : (
-        <div className="activity-feed-card">
-          <div className="activity-feed-icon">
-            <Newspaper size={20} strokeWidth={2} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <p className="eyebrow">
-              {tr("STEAM NEWS", "STEAM HABERİ")} · {news.title}
-            </p>
+          <div className="sh-hero-actions">
+            <span className="sh-sync-meta">
+              {loading
+                ? tr("Fetching from your stores", "Mağazalardan alınıyor")
+                : lastSyncAt
+                  ? tr(`Updated ${relativeTime(lastSyncAt, language)}`, `Güncellendi: ${relativeTime(lastSyncAt, language)}`)
+                  : ""}
+            </span>
             <button
               type="button"
-              className="activity-feed-title-btn"
-              onClick={() => news.lastNewsUrl && openUrl(news.lastNewsUrl)}
-              disabled={!news.lastNewsUrl}
-              title={news.lastNewsUrl ?? ""}
+              className="secondary-button compact-button sh-refresh"
+              onClick={() => void fetchAll()}
+              disabled={loading}
             >
-              {news.lastNewsTitle}
+              <RefreshCw size={14} className={loading ? "spin" : ""} />
+              {loading ? tr("Updating", "Güncelleniyor") : tr("Refresh", "Yenile")}
             </button>
-            {news.lastNewsAt && (
-              <p className="activity-feed-time">
-                {tr(`Last update: ${relativeTime(news.lastNewsAt, language)}`,
-                    `Son güncelleme: ${relativeTime(news.lastNewsAt, language)}`)}
-              </p>
-            )}
           </div>
-        </div>
-      )}
-    </section>
-  );
-}
+        </motion.section>
 
-function MobileInsights({
-  insights, tr,
-}: {
-  insights: {
-    hasPlay: boolean;
-    installs: number;
-    uninstalls: number;
-    retentionPct: number | null;
-  };
-  tr: (en: string, t: string) => string;
-}) {
-  const setWorkspaceTab = useAppStore((s) => s.setWorkspaceTab);
-  const installs = insights.installs;
-  const uninstalls = insights.uninstalls;
-  const max = Math.max(installs, uninstalls, 1);
-  const installPct = (installs / max) * 100;
-  const uninstallPct = (uninstalls / max) * 100;
+        {failedRows.length > 0 && (
+          <motion.div className="sh-banner" role="alert" {...reveal(1)}>
+            <AlertTriangle size={15} />
+            <span>
+              {tr(
+                `Could not read ${failedRows.length} store ${failedRows.length === 1 ? "link" : "links"}. Totals leave ${failedRows.length === 1 ? "it" : "them"} out; the game list below shows why.`,
+                `${failedRows.length} mağaza bağlantısı okunamadı. Toplamlara dahil edilmedi, sebebi aşağıdaki oyun listesinde yazıyor.`,
+              )}
+            </span>
+          </motion.div>
+        )}
 
-  return (
-    <section className="panel mobile-insights-panel">
-      <div className="panel-head">
-        <div>
-          <p className="eyebrow">{tr("MOBILE GROWTH", "MOBİL BÜYÜME")}</p>
-          <h3>{tr("Installs vs Uninstalls", "Yüklemeler vs Kaldırmalar")}</h3>
-        </div>
-        <Smartphone size={20} strokeWidth={2} style={{ color: "#34d399" }} />
-      </div>
-
-      {!insights.hasPlay ? (
-        <div className="storehub-cta-empty">
-          <Smartphone size={48} strokeWidth={1.4} className="storehub-cta-icon" />
-          <p className="storehub-cta-msg">
+        {/* ── 2. Stat cards ───────────────────────────────────────── */}
+        <motion.section
+          className="sh-stats"
+          style={{ "--sh-cols": String(Math.max(1, firstLoad ? 3 : statCount)) } as CSSProperties}
+          aria-label={tr("Summary", "Özet")}
+          {...reveal(2)}
+        >
+          {firstLoad
+            ? [0, 1, 2].map((i) => (
+                <div key={i} className="skeleton-card">
+                  <div className="skeleton skeleton-icon" />
+                  <div className="skeleton-body">
+                    <div className="skeleton skeleton-line skeleton-line-sm" />
+                    <div className="skeleton skeleton-line skeleton-line-lg" />
+                  </div>
+                </div>
+              ))
+            : (
+              <>
+                {summaryMetrics.map((k) => {
+                  const Icon = METRIC_ICON[k];
+                  const ch = changeOf(k);
+                  return (
+                    <div key={k} className="hero-stat-card sh-stat" style={{ "--hero-accent": METRIC_ACCENT[k] } as CSSProperties}>
+                      <div className="hero-stat-icon"><Icon size={22} strokeWidth={2} /></div>
+                      <div className="hero-stat-body">
+                        <span className="hero-stat-label">{metricLabel[k]}</span>
+                        <strong className="hero-stat-value" title={nf.format(totals[k])}>
+                          {formatMetric(k, totals[k], totals[k] >= 1000)}
+                        </strong>
+                        <span className={`burn-card-subtitle burn-card-subtitle-${ch.tone} sh-change`}>
+                          {ch.up === true && <ArrowUpRight size={12} />}
+                          {ch.up === false && <ArrowDownRight size={12} />}
+                          {ch.text}
+                        </span>
+                      </div>
+                      <div className="hero-stat-bar" />
+                    </div>
+                  );
+                })}
+                {totals.rating != null && (
+                  <div className="hero-stat-card sh-stat" style={{ "--hero-accent": "#fbbf24" } as CSSProperties}>
+                    <div className="hero-stat-icon"><Star size={22} strokeWidth={2} /></div>
+                    <div className="hero-stat-body">
+                      <span className="hero-stat-label">{tr("Player rating", "Oyuncu puanı")}</span>
+                      <strong className="hero-stat-value">
+                        {fmtDec(totals.rating, 1)}<span className="sh-stat-suffix"> / 5</span>
+                      </strong>
+                      <span className="burn-card-subtitle burn-card-subtitle-neutral">
+                        {tr(`from ${nf.format(totals.ratingCount)} ratings`, `${nf.format(totals.ratingCount)} oydan`)}
+                      </span>
+                    </div>
+                    <div className="hero-stat-bar" />
+                  </div>
+                )}
+              </>
+            )}
+        </motion.section>
+        {totals.mixedCurrency && (
+          <p className="sh-note">
             {tr(
-              "Map a Google Play game to see install health here.",
-              "Yükleme/kaldırma sağlığını görmek için bir Google Play oyunu eşleştir."
+              "Your stores pay in different currencies. Revenue is added up as-is and shown in the first currency.",
+              "Mağazaların farklı para birimleriyle ödüyor. Gelir olduğu gibi toplanıp ilk para biriminde gösteriliyor.",
             )}
           </p>
-          <button
-            type="button"
-            className="storehub-cta-btn"
-            onClick={() => setWorkspaceTab("library")}
-          >
-            {tr("Map Google Play →", "Google Play'i Eşleştir →")}
-          </button>
-        </div>
-      ) : installs === 0 && uninstalls === 0 ? (
-        <div className="chart-empty-hint">
-          {tr(
-            "Reporting API didn't return install metrics. Check service account permissions.",
-            "Reporting API yükleme metriği döndürmedi. Service account izinlerini kontrol et."
-          )}
-        </div>
-      ) : (
-        <div className="mobile-insights-body">
-          <div className="mobile-row mobile-row-installs">
-            <div className="mobile-row-label">
-              <TrendingUp size={14} />
-              <span>{tr("Active Installs", "Aktif Yüklemeler")}</span>
-              <strong>{installs.toLocaleString()}</strong>
-            </div>
-            <div className="mobile-bar-track">
-              <motion.div
-                className="mobile-bar-fill mobile-bar-installs"
-                initial={{ width: 0 }}
-                animate={{ width: `${installPct}%` }}
-                transition={{ duration: 0.6, ease: [0.25, 1, 0.5, 1] }}
-              />
-            </div>
-          </div>
+        )}
 
-          <div className="mobile-row mobile-row-uninstalls">
-            <div className="mobile-row-label">
-              <TrendingDown size={14} />
-              <span>{tr("Uninstalls (30d)", "Kaldırma (30g)")}</span>
-              <strong>{uninstalls.toLocaleString()}</strong>
-            </div>
-            <div className="mobile-bar-track">
-              <motion.div
-                className="mobile-bar-fill mobile-bar-uninstalls"
-                initial={{ width: 0 }}
-                animate={{ width: `${uninstallPct}%` }}
-                transition={{ duration: 0.6, ease: [0.25, 1, 0.5, 1], delay: 0.08 }}
-              />
-            </div>
-          </div>
-
-          {insights.retentionPct != null && (
-            <p className="section-copy mobile-retention">
-              <Sparkles size={12} style={{ marginRight: 6, color: "#facc15" }} />
-              {tr(
-                `Retention strength: ${insights.retentionPct}%`,
-                `Kalıcılık oranı: %${insights.retentionPct}`
+        {/* ── 3. Compare | Games (equal height) ───────────────────── */}
+        <div className={"sh-duo" + (firstLoad ? " is-loading" : "")}>
+          {!firstLoad && (
+            <motion.section className="panel sh-compare" {...reveal(3)}>
+              {panelHead(
+                BarChart3,
+                tr("COMPARE", "KARŞILAŞTIRMA"),
+                compareSource === "games" ? tr("Games side by side", "Oyunlar yan yana") : tr("Stores side by side", "Mağazalar yan yana"),
+                storeSummaries.length > 1 && (
+                  <div className="sh-segment" role="tablist" aria-label={tr("Compare", "Karşılaştır")}>
+                    {(["games", "stores"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        role="tab"
+                        aria-selected={compareSource === m}
+                        className={compareSource === m ? "is-active" : undefined}
+                        onClick={() => setCompareMode(m)}
+                      >
+                        {m === "games" ? tr("Games", "Oyunlar") : tr("Stores", "Mağazalar")}
+                      </button>
+                    ))}
+                  </div>
+                ),
               )}
-            </p>
+              {compareOptions.length > 1 && (
+                <div className="sh-chips" role="tablist" aria-label={tr("Metric", "Metrik")}>
+                  {compareOptions.map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      role="tab"
+                      aria-selected={compareMetric === k}
+                      className={"filter-chip" + (compareMetric === k ? " filter-chip-active" : "")}
+                      onClick={() => setCompareMetric(k)}
+                    >
+                      {metricLabel[k]}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {compareItems.length === 0 ? (
+                <div className="chart-empty-hint">
+                  {tr("No numbers for this metric yet.", "Bu metrik için henüz rakam yok.")}
+                </div>
+              ) : (
+                <ol className="sh-bars">
+                  {compareItems.map((item, i) => {
+                    const pct = compareMax > 0 ? (item.value / compareMax) * 100 : 0;
+                    const gameId = item.gameId;
+                    return (
+                      <li key={item.id}>
+                        <button
+                          type="button"
+                          className="sh-bar-row"
+                          onClick={gameId ? () => openGame(gameId) : undefined}
+                          disabled={!gameId}
+                        >
+                          <span className={"sh-rank" + (i === 0 && compareItems.length > 1 ? " is-first" : "")}>{i + 1}</span>
+                          <span className="sh-bar-main">
+                            <span className="sh-bar-top">
+                              <span className="sh-bar-name">
+                                {item.name}
+                                <span className="sh-bar-stores">
+                                  {item.providers.map((p) => {
+                                    const Icon = PROVIDER_ICON[p];
+                                    return <Icon key={p} size={11} style={{ color: PROVIDER_COLOR[p] }} />;
+                                  })}
+                                </span>
+                              </span>
+                              <span className="sh-bar-value">
+                                {formatMetric(compareMetric, item.value)}
+                                {additive && compareTotal > 0 && compareItems.length > 1 && (
+                                  <small>{pctFmt.format(item.value / compareTotal)}</small>
+                                )}
+                              </span>
+                            </span>
+                            <span className="sh-bar-track">
+                              <motion.span
+                                style={{ background: i === 0 ? accent : `color-mix(in srgb, ${accent} 45%, transparent)` }}
+                                initial={{ width: 0 }}
+                                animate={{ width: `${Math.max(item.value > 0 ? 2 : 0, pct)}%` }}
+                                transition={{ duration: 0.5, ease: [0.25, 1, 0.5, 1], delay: i * 0.04 }}
+                              />
+                            </span>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+              {compareItems.length > 1 && additive && (
+                <div className="sh-compare-total">
+                  <span>
+                    {tr(
+                      `Total across ${compareItems.length} ${compareSource === "games" ? "games" : "stores"}`,
+                      `${compareItems.length} ${compareSource === "games" ? "oyunun" : "mağazanın"} toplamı`,
+                    )}
+                  </span>
+                  <strong>{formatMetric(compareMetric, compareTotal)}</strong>
+                </div>
+              )}
+              {compareItems.length === 1 && compareSource === "games" && (
+                <p className="sh-note sh-note-inset">
+                  {tr("Link more games to stores to compare them here.", "Burada karşılaştırmak için daha fazla oyunu mağazaya bağla.")}
+                </p>
+              )}
+            </motion.section>
           )}
+          <div className="sh-games-slot">
+            <motion.section className="panel sh-games-panel" {...reveal(4)}>
+              {panelHead(Gamepad2, tr("GAMES", "OYUNLAR"), tr("Details per game", "Oyun bazında ayrıntılar"))}
+              <ul className="sh-game-list">
+                {firstLoad
+                  ? Array.from(new Set(mappedTargets.map((m) => m.gameId))).map((id) => (
+                      <li key={id} className="sh-game is-loading">
+                        <div className="skeleton sh-game-cover" />
+                        <div className="sh-game-body">
+                          <div className="skeleton skeleton-line skeleton-line-sm" />
+                          <div className="skeleton skeleton-line skeleton-line-lg" />
+                        </div>
+                      </li>
+                    ))
+                  : gameSummaries.map((g) => {
+                      const src = imgSrc(g.cover);
+                      const stats: { key: string; value: string; label: string }[] = [];
+                      for (const k of ["downloads", "earnings", "views", "wishlist", "currentPlayers"] as MetricKey[]) {
+                        const v = g.totals[k];
+                        if (v == null) continue;
+                        stats.push({
+                          key: k,
+                          value: k === "earnings" ? fmtMoney(v, g.currency ?? totals.currency) : fmtNum(v),
+                          label: metricLabel[k],
+                        });
+                      }
+                      if (g.downloadRate != null) {
+                        // Only Itch.io reports page views, so the rate is Itch-only;
+                        // say so when the card also sums other stores' downloads.
+                        stats.push({
+                          key: "rate",
+                          value: pctFmt.format(g.downloadRate),
+                          label: g.providers.length > 1 ? tr("Itch.io download rate", "Itch.io indirme oranı") : tr("Download rate", "İndirme oranı"),
+                        });
+                      }
+                      return (
+                        <li key={g.gameId}>
+                          <button type="button" className="sh-game" onClick={() => openGame(g.gameId)}>
+                            <span className="sh-game-cover">
+                              {src ? <img src={src} alt="" /> : <span>{g.title.slice(0, 1).toUpperCase()}</span>}
+                            </span>
+                            <span className="sh-game-body">
+                              <span className="sh-game-head">
+                                <span className="sh-game-title">{g.title}</span>
+                                <span className="sh-game-stores">
+                                  {g.providers.map((p) => {
+                                    const Icon = PROVIDER_ICON[p];
+                                    return (
+                                      <span key={p} className="sh-store-tag">
+                                        <Icon size={11} style={{ color: PROVIDER_COLOR[p] }} />
+                                        {PROVIDER_LABEL[p]}
+                                      </span>
+                                    );
+                                  })}
+                                </span>
+                              </span>
+                              {stats.length > 0 && (
+                                <span className="sh-game-stats">
+                                  {stats.map((s) => (
+                                    <span key={s.key} className="sh-game-stat">
+                                      <strong>{s.value}</strong>
+                                      <small>{s.label}</small>
+                                    </span>
+                                  ))}
+                                  {g.rating != null && (
+                                    <span className="sh-game-stat">
+                                      <strong className="sh-rating"><Star size={12} fill="currentColor" />{fmtDec(g.rating, 1)}</strong>
+                                      <small>{tr("Rating", "Puan")}</small>
+                                    </span>
+                                  )}
+                                </span>
+                              )}
+                              {g.errors.map((e) => (
+                                <span key={e.provider} className="sh-game-error">
+                                  <AlertTriangle size={12} />
+                                  {tr(`${PROVIDER_LABEL[e.provider]} could not be read: `, `${PROVIDER_LABEL[e.provider]} okunamadı: `)}
+                                  {e.message}
+                                </span>
+                              ))}
+                            </span>
+                            <ChevronRight size={16} className="sh-game-chevron" aria-hidden="true" />
+                          </button>
+                        </li>
+                      );
+                    })}
+              </ul>
+              {!showTrend && !firstLoad && (
+                <p className="sh-note sh-note-inset">
+                  {tr(
+                    "A day-by-day chart appears once HeraVex has numbers from two different days. They stay on this computer.",
+                    "HeraVex iki farklı günün rakamlarını topladığında günlük gidişat grafiği belirir. Rakamlar bu bilgisayarda kalır.",
+                  )}
+                </p>
+              )}
+            </motion.section>
+          </div>
         </div>
-      )}
-    </section>
+
+        {/* ── 4. Trend (only with real history) ───────────────────── */}
+        {showTrend && !firstLoad && (
+          <motion.section className="panel sh-trend" {...reveal(5)}>
+            {panelHead(
+              TrendingUp,
+              tr("TREND", "GİDİŞAT"),
+              tr("Day by day", "Günlük gidişat"),
+              trendOptions.length > 1 && (
+                <div className="sh-segment" role="tablist" aria-label={tr("Chart metric", "Grafik metriği")}>
+                  {trendOptions.map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      role="tab"
+                      aria-selected={trendMetric === k}
+                      className={trendMetric === k ? "is-active" : undefined}
+                      onClick={() => setTrendMetric(k)}
+                    >
+                      {metricLabel[k]}
+                    </button>
+                  ))}
+                </div>
+              ),
+            )}
+            <ResponsiveContainer width="100%" height={210}>
+              <AreaChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+                <defs>
+                  <linearGradient id="sh-trend-grad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={METRIC_ACCENT[trendMetric]} stopOpacity={0.35} />
+                    <stop offset="100%" stopColor={METRIC_ACCENT[trendMetric]} stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.05)" />
+                <XAxis dataKey="label" tick={{ fill: "#94a3b8", fontSize: 10 }} stroke="rgba(255,255,255,0.08)" tickLine={false} minTickGap={18} />
+                <YAxis
+                  tick={{ fill: "#94a3b8", fontSize: 10 }}
+                  stroke="transparent"
+                  width={56}
+                  tickFormatter={(v) => formatMetric(trendMetric, Number(v), true)}
+                />
+                <RechartsTooltip
+                  cursor={{ stroke: "rgba(255,255,255,0.12)" }}
+                  contentStyle={{
+                    background: "rgba(15, 22, 36, 0.96)",
+                    border: "1px solid rgba(255, 255, 255, 0.08)",
+                    borderRadius: 10,
+                    fontSize: 12,
+                  }}
+                  labelStyle={{ color: "#94a3b8", fontSize: 10 }}
+                  formatter={(v) => [formatMetric(trendMetric, Number(v ?? 0)), metricLabel[trendMetric]]}
+                />
+                <Area type="monotone" dataKey="value" stroke={METRIC_ACCENT[trendMetric]} strokeWidth={2} fill="url(#sh-trend-grad)" isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </motion.section>
+        )}
+
+      </div>
+    </MotionConfig>
   );
 }

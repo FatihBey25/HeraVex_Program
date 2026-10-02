@@ -1,0 +1,16 @@
+{
+  "id": "theme-pack",
+  "name": "Theme Pack",
+  "description": "8 tema: Dracula, Nord, Aurora, Sakura, Neon City, Sandstorm, Deep Space, Ember. Ayarlar ve galeri sayfasiyla.",
+  "version": "2.0.0",
+  "author": "HeraVex",
+  "apiVersion": 1,
+  "entry": "index.js",
+  "permissions": ["dom", "storage"],
+  "contributes": {
+    "pages": [{ "id": "theme-gallery", "title": "Theme Gallery", "icon": "Sparkles" }],
+    "widgets": [{ "id": "theme-mini", "slot": "dashboard" }],
+    "commands": [{ "id": "cycle-theme", "title": "Sonraki temaya gec" }],
+    "settings": [{ "id": "theme-prefs", "title": "Theme Pack" }]
+  }
+}

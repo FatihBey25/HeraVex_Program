@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Trash, Receipt, PieChart as PieIcon } from "lucide-react";
+import { Trash, Receipt, PieChart as PieIcon, History, X } from "lucide-react";
 import { imgSrc } from "../lib/images";
 import { useAppStore } from "../store";
 import { PieChartWidget, calculateAccumulatedAmount } from "./PieChartWidget";
@@ -9,6 +9,8 @@ import { totalSharedSpendForGame } from "../lib/expenseAllocation";
 import { ConfirmDialog } from "./shared/ConfirmDialog";
 import { EmptyState } from "./shared/EmptyState";
 import { isGeneralGame } from "../lib/general-game";
+import { getCachedWorkspacePath } from "../lib/storage";
+import { loadWorkspaces, resolveActiveWorkspace } from "../lib/workspaces";
 import type { ExpenseItem } from "../types";
 
 const CURRENCY_OPTIONS = ["EUR","TRY","JPY","GBP","CAD","AUD","CHF","SEK","NOK","DKK","PLN","CZK"];
@@ -264,8 +266,23 @@ export function Wallet() {
   const {
     games, globalExpenses, exchangeRates, activeCurrencies,
     setActiveCurrencies, handleAddExpense, handleDeleteExpense, updateGlobalExpense,
-    ui, language, general,
+    ui, language, general, walletLegacyAvailable, importLegacyWallet,
   } = useAppStore();
+  // The wallet belongs to the active workspace (v0.9.9); say which one.
+  const workspacePath = getCachedWorkspacePath();
+  const workspaceName = useMemo(() => {
+    const ws = resolveActiveWorkspace(loadWorkspaces(), workspacePath);
+    return ws.id === "default" ? (language === "tr" ? "Varsayılan" : "Default") : ws.name;
+  }, [workspacePath, language]);
+  // "Copy the old wallet in" offer, dismissible per workspace.
+  const legacyDismissKey = `heravex_wallet_legacy_dismissed:${workspacePath ?? "default"}`;
+  const [legacyDismissed, setLegacyDismissed] = useState(() => {
+    try { return localStorage.getItem(legacyDismissKey) === "1"; } catch { return false; }
+  });
+  const dismissLegacy = () => {
+    setLegacyDismissed(true);
+    try { localStorage.setItem(legacyDismissKey, "1"); } catch { /* quota */ }
+  };
   // List passed to the per-row "share with games" picker on general
   // expenses. We exclude the internal "General" marker game so users
   // never see it as a target.
@@ -395,7 +412,9 @@ export function Wallet() {
       {/* Header */}
       <section className="wallet-top-card" style={{ paddingRight: "360px" }}>
         <div style={{ flex: 1 }}>
-          <p className="eyebrow">STUDIO DASHBOARD</p>
+          <p className="eyebrow">
+            {language === "tr" ? `ÇALIŞMA ALANI: ${workspaceName.toLocaleUpperCase("tr")}` : `WORKSPACE: ${workspaceName.toUpperCase()}`}
+          </p>
           <h1 style={{ margin: 0, fontSize: "2rem" }}>{ui.financialSummary}</h1>
           <h2 style={{ marginTop: "1rem", fontSize: "2.5rem", fontWeight: 800, color: "var(--primary)" }}>
             {fmtUsd(totalAll)}
@@ -403,6 +422,28 @@ export function Wallet() {
           <span className="eyebrow">{ui.wTotalAllPlain}</span>
         </div>
       </section>
+
+      {walletLegacyAvailable > 0 && !legacyDismissed && (
+        <div className="wallet-legacy-offer" role="status">
+          <History size={16} aria-hidden="true" />
+          <span>
+            {language === "tr"
+              ? `Cüzdan artık her çalışma alanına ayrı. Önceki sürümden kalan ${walletLegacyAvailable} genel gider bu çalışma alanında yok.`
+              : `The wallet is now separate per workspace. ${walletLegacyAvailable} general expense${walletLegacyAvailable === 1 ? "" : "s"} from the previous version ${walletLegacyAvailable === 1 ? "is" : "are"} not in this workspace.`}
+          </span>
+          <button type="button" className="primary-button compact-button" onClick={() => void importLegacyWallet()}>
+            {language === "tr" ? "Bu çalışma alanına aktar" : "Copy into this workspace"}
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={dismissLegacy}
+            aria-label={language === "tr" ? "Kapat" : "Dismiss"}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Monthly trend — rolling 12-month aggregate of global + project
           expenses. Caption above shows delta vs the prior month. */}

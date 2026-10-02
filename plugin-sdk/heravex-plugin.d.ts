@@ -16,7 +16,7 @@ export type PluginPermission =
   | "network"     // hv.fetch() — HTTP through the Rust backend
   | "storage"     // hv.storage.*
   // ── power tier ──
-  | "dom"         // hv.dom.* — inject CSS, observe/decorate any UI element
+  | "dom"         // hv.dom.* + hv.themes.* — inject CSS, observe/decorate UI, register themes
   | "hooks"       // hv.hooks.* + hv.store.watch — intercept core operations
   | "editor"      // hv.editor.* — custom syntax, slash commands
   | "input";      // hv.menu.* + hv.hotkeys.* — context menus, hotkeys
@@ -126,9 +126,24 @@ export interface HeraVexAPI {
     /** Inject a stylesheet. Full-theme power: any selector, any rule. */
     injectStyle(css: string): () => void;
     /** Runs `cb` for every current AND future element matching
-     *  `selector` (MutationObserver-backed). Add buttons, rewire
-     *  handlers, replace content — the element is yours. */
+     *  `selector` (MutationObserver-backed).
+     *  ⚠️ NEVER append into / remove children from React-owned nodes —
+     *  it can crash the app (removeChild). Use `mountToSlot` instead. */
     onElement(selector: string, cb: (el: HTMLElement) => void): () => void;
+    /** SAFE injection point (v0.9.9). Append `el` into one of the core's
+     *  stable `data-hv-slot` mounts. React never renders children there,
+     *  so appending never crashes reconciliation; re-mounted if the slot
+     *  remounts; removed on dispose. Known slots:
+     *    "sidebar-nav-end" · "dashboard-top" */
+    mountToSlot(slot: string, el: HTMLElement): () => void;
+  };
+
+  /** Register a custom app theme — requires "dom". The core renders it as
+   *  a native pill in Settings → Appearance → Theme and owns
+   *  apply/persist/revert. This is the crash-proof way to theme the app
+   *  (do NOT try to inject into Settings via onElement). */
+  themes: {
+    register(theme: { id: string; label: string; css: string }): () => void;
   };
 
   /** Core-operation interception — requires "hooks".

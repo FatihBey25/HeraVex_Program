@@ -63,10 +63,16 @@ export interface BackupPrefsSlice {
   customLocation: string;
   /** Push completed backup to a cloud-mirrored folder if set. */
   mirrorToCloud: boolean;
+  /** Folder the backups are copied to when `mirrorToCloud` is on. */
+  mirrorPath: string;
   /** How many backups to retain before pruning oldest. */
   retentionCount: number;
   /** Compress older backups (gzip) when pruning. */
   compressOld: boolean;
+  /** Settings → Storage: when a new version is added, delete the build
+   *  files of older versions beyond `buildsToKeep` (entries stay). */
+  autoPruneBuilds: boolean;
+  buildsToKeep: number;
 }
 
 export const DEFAULT_BACKUP_PREFS: BackupPrefsSlice = {
@@ -75,8 +81,11 @@ export const DEFAULT_BACKUP_PREFS: BackupPrefsSlice = {
   onlyWhileOpen: true,
   customLocation: "",
   mirrorToCloud: false,
+  mirrorPath: "",
   retentionCount: 7,
   compressOld: false,
+  autoPruneBuilds: false,
+  buildsToKeep: 5,
 };
 
 // ── localStorage ─────────────────────────────────────────────────────
@@ -87,6 +96,15 @@ const KEY_BACKUP  = "heravex_backup_prefs_v1";
 export function loadStudioIdentity(): StudioIdentitySlice {
   return safeRead(KEY_STUDIO, DEFAULT_STUDIO_IDENTITY);
 }
+/** What Rust does after each backup (retention, compression, mirror). */
+export function backupHousekeeping(b: BackupPrefsSlice) {
+  return {
+    retention: Math.max(1, b.retentionCount || 7),
+    compressOld: b.compressOld === true,
+    mirrorDir: b.mirrorToCloud && b.mirrorPath.trim() ? b.mirrorPath : null,
+  };
+}
+
 export function loadBackupPrefs(): BackupPrefsSlice {
   return safeRead(KEY_BACKUP, DEFAULT_BACKUP_PREFS);
 }

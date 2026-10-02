@@ -98,6 +98,11 @@ export interface GeneralSlice {
    *  the bottom-right corner. Opt-out for users on small displays who
    *  find it intrusive. */
   quickCapture: boolean;
+
+  /** When true, closing the window hides HeraVex to the system tray
+   *  (bottom-right on Windows) so sync, Pomodoro and reminders keep
+   *  running. "Quit" in the tray menu exits for real. */
+  closeToTray: boolean;
 }
 
 export const DEFAULT_GENERAL: GeneralSlice = {
@@ -115,6 +120,7 @@ export const DEFAULT_GENERAL: GeneralSlice = {
   confirmOnBatch: true,
 
   quickCapture: true,
+  closeToTray: true,
 };
 
 // ── Storage ─────────────────────────────────────────────────────────

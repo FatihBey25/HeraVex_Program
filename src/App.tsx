@@ -70,9 +70,14 @@ function prefetchPages() {
 }
 import { applyAppearanceToDom } from "./lib/appearance";
 import { PomodoroWidget } from "./components/PomodoroWidget";
+import { BreakLockOverlay } from "./components/BreakLockOverlay";
 import { togglePomodoro as togglePomodoroFn, refreshDurationsForCurrentPhase } from "./lib/pomodoro";
+import { notify } from "./lib/notify";
+import { requestCreate } from "./lib/createIntents";
 import { INITIAL_PAGE_OPTIONS } from "./lib/preferences";
 import { useAutoBackupScheduler } from "./lib/autoBackup";
+import { useStoreAutoSync } from "./lib/storeSync";
+import { initialWindowTab, isSecondaryWindow } from "./lib/windowRole";
 import { applyPrivacyClasses } from "./lib/privacyExperimental";
 import { AutoLockOverlay } from "./components/AutoLockOverlay";
 import { PerformanceMonitor } from "./components/PerformanceMonitor";
@@ -140,11 +145,11 @@ export default function App() {
       newGame:            () => setShowCreateGame(true),
       newTask: () => {
         setWorkspaceTab("tasks");
-        window.dispatchEvent(new CustomEvent("heravex:new-task"));
+        requestCreate("task");
       },
       newNote: () => {
         setWorkspaceTab("notes");
-        window.dispatchEvent(new CustomEvent("heravex:new-note"));
+        requestCreate("note");
       },
       // Actions
       togglePomodoro: () => {
@@ -154,6 +159,12 @@ export default function App() {
       },
       quickBackup:        () => void handleExportBackup(),
       switchGame:         () => setWorkspaceTab("library"),
+      newWindow: () => {
+        if (!useAppStore.getState().startup.multiWindow) return;
+        void import("./lib/invokeWrapper").then(({ invoke }) =>
+          invoke("open_app_window", { tab: null }).catch((err) => useAppStore.getState().showError(err)),
+        );
+      },
     })
   );
 
@@ -271,7 +282,68 @@ export default function App() {
   // timestamp in localStorage. `handleExportBackup` already does
   // the heavy lift.
   const backupPrefs = useAppStore((s) => s.backupPrefs);
-  useAutoBackupScheduler(backupPrefs, useAppStore.getState().handleExportBackup);
+  // Once per app: extra windows (Settings → Startup → multi-window) skip it.
+  useAutoBackupScheduler(
+    isSecondaryWindow ? { ...backupPrefs, schedule: "off" } : backupPrefs,
+    () => useAppStore.getState().handleExportBackup({ auto: true }),
+  );
+
+  // Settings → API keys → "Sync interval": refresh store numbers in the
+  // background while the app is open.
+  const gamesForSync = useAppStore((s) => s.games);
+  useStoreAutoSync(gamesForSync, !isLoading && !isSecondaryWindow);
+
+  // ── Multiple windows ───────────────────────────────────────────────
+  const multiWindow = useAppStore((s) => s.startup.multiWindow === true);
+  useEffect(() => {
+    void import("./lib/invokeWrapper").then(({ invoke }) =>
+      invoke("set_multi_window", { enabled: multiWindow }).catch(() => { /* not in Tauri */ }),
+    );
+  }, [multiWindow]);
+  // A new window can open on a given page (`?tab=notes`).
+  useEffect(() => {
+    if (isLoading || !initialWindowTab) return;
+    setWorkspaceTab(initialWindowTab as Parameters<typeof setWorkspaceTab>[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading]);
+  // Another window saved something: re-read just that. Our own save
+  // echoing back is a no-op (same updatedAt / same content).
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let disposed = false;
+    void (async () => {
+      const off = await listen<{ kind: string; ids: string[] }>("local-data-changed", (ev) => {
+        const { kind, ids } = ev.payload;
+        const st = useAppStore.getState();
+        if (kind === "games") {
+          if (ids.length) void st.syncGamesFromDisk(ids);
+          else void st.refreshGames(undefined, { silent: true });
+        } else if (kind === "notes") {
+          window.dispatchEvent(new CustomEvent("heravex:notes-file-changed", {
+            detail: ids.length ? { noteIds: ids, removedNoteIds: [] } : undefined,
+          }));
+        } else if (kind === "flows") {
+          window.dispatchEvent(new CustomEvent("heravex:flow-file-changed"));
+        } else if (kind === "wallet") {
+          void st.loadWallet({ silent: true });
+        }
+      });
+      if (disposed) off(); else unlisten = off;
+    })();
+    return () => { disposed = true; if (unlisten) unlisten(); };
+  }, []);
+  // Preferences live in localStorage; another window changing one fires
+  // a `storage` event here.
+  useEffect(() => {
+    let t: number | undefined;
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || !e.key.startsWith("heravex_")) return;
+      window.clearTimeout(t);
+      t = window.setTimeout(() => useAppStore.getState().reloadPreferences(), 150);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("storage", onStorage); window.clearTimeout(t); };
+  }, []);
 
   // Silent on-launch auto-backup → AppData/heravex/backups/auto-*.json.
   // Runs once per app session, ~3s after the workspace finishes loading
@@ -281,7 +353,7 @@ export default function App() {
   // Backup settings still drives the longer-term cadence on top of this.
   const launchBackupRef = useRef(false);
   useEffect(() => {
-    if (isLoading || launchBackupRef.current) return;
+    if (isLoading || launchBackupRef.current || isSecondaryWindow) return;
     if (backupPrefs.schedule === "off") return;
     launchBackupRef.current = true;
     const last = Number(localStorage.getItem("heravex_last_launch_backup_at") || 0);
@@ -293,7 +365,10 @@ export default function App() {
       window.dispatchEvent(new CustomEvent("heravex:busy", { detail: { id: busyId, label } }));
       try {
         const { invoke } = await import("./lib/invokeWrapper");
-        await invoke<string>("export_backup_silent");
+        const { backupHousekeeping } = await import("./lib/studioIdentity");
+        await invoke<string>("export_backup_silent", {
+          housekeeping: backupHousekeeping(useAppStore.getState().backupPrefs),
+        });
         localStorage.setItem("heravex_last_launch_backup_at", String(Date.now()));
         showToast(language === "tr" ? "Otomatik yedek alındı." : "Auto-backup saved.", "success");
       } catch (err) {
@@ -333,6 +408,25 @@ export default function App() {
   // Discover + activate installed plugins once at startup. Later
   // installs/toggles re-run initPlugins() from the Settings page.
   useEffect(() => { void initPlugins(); }, []);
+  // A plugin that fails to load used to fail silently (only visible in
+  // Settings → Plugins). Tell the user once per plugin per session.
+  useEffect(() => {
+    const told = new Set<string>();
+    const onFail = (e: Event) => {
+      const { id, name, error } = (e as CustomEvent<{ id: string; name: string; error: string }>).detail;
+      if (told.has(id)) return;
+      told.add(id);
+      const lang = useAppStore.getState().language;
+      useAppStore.getState().showToast(
+        lang === "tr"
+          ? `"${name}" eklentisi yüklenemedi (${error}). Ayarlar → Eklentiler'den kapatabilir veya kaldırabilirsin.`
+          : `The "${name}" plugin failed to load (${error}). You can disable or remove it in Settings → Plugins.`,
+        "warning",
+      );
+    };
+    window.addEventListener("heravex:plugin-failed", onFail);
+    return () => window.removeEventListener("heravex:plugin-failed", onFail);
+  }, []);
 
   // Suppress the WebView's native right-click menu (Back / Reload / Save
   // as…) app-wide — it clashes with our custom context menus (e.g. Flow
@@ -441,16 +535,149 @@ export default function App() {
     return () => { if (unlisten) unlisten(); };
   }, []);
 
+  // ── System tray (bottom-right) ─────────────────────────────────────
+  // Rust owns the tray icon and hide-on-close. The UI keeps it in sync
+  // with the user's preference + language and runs the quick actions
+  // picked from the tray menu.
+  const closeToTray = useAppStore((s) => s.general.closeToTray !== false);
+  useEffect(() => {
+    void import("./lib/invokeWrapper").then(({ invoke }) =>
+      invoke("set_close_to_tray", { enabled: closeToTray }).catch(() => { /* not in Tauri */ }),
+    );
+  }, [closeToTray]);
+  const minimiseToTray = useAppStore((s) => s.startup.minimiseToTray === true);
+  useEffect(() => {
+    void import("./lib/invokeWrapper").then(({ invoke }) =>
+      invoke("set_minimise_to_tray", { enabled: minimiseToTray }).catch(() => { /* not in Tauri */ }),
+    );
+  }, [minimiseToTray]);
+  useEffect(() => {
+    void import("./lib/invokeWrapper").then(({ invoke }) =>
+      invoke("set_tray_language", { language }).catch(() => { /* not in Tauri */ }),
+    );
+  }, [language]);
+  useEffect(() => {
+    const unlisteners: UnlistenFn[] = [];
+    let disposed = false;
+    void (async () => {
+      // Tray / backup events are for the main window only.
+      if (isSecondaryWindow) return;
+      const onAction = await listen<string>("tray-action", (ev) => {
+        const { setWorkspaceTab: goTo } = useAppStore.getState();
+        switch (ev.payload) {
+          case "new-task":
+            goTo("tasks");
+            requestCreate("task");
+            break;
+          case "new-note":
+            goTo("notes");
+            requestCreate("note");
+            break;
+          case "pomodoro":
+            togglePomodoroFn();
+            break;
+        }
+      });
+      // First hide-to-tray only: tell the user the app is still running,
+      // otherwise "I closed it" + "it's still syncing" looks like a bug.
+      const onHidden = await listen("hidden-to-tray", () => {
+        const KEY = "heravex_tray_hint_shown";
+        try {
+          if (localStorage.getItem(KEY)) return;
+          localStorage.setItem(KEY, "1");
+        } catch { /* storage blocked: show it anyway */ }
+        const lang = useAppStore.getState().language;
+        void notify(
+          "HeraVex",
+          lang === "tr"
+            ? "Arka planda çalışmaya devam ediyor. Açmak için sağ alttaki simgeye tıkla, kapatmak için sağ tıklayıp Çıkış'ı seç."
+            : "Still running in the background. Click the tray icon to open it, or right-click and choose Quit to exit.",
+        );
+      });
+      // Settings → Backup "Mirror to cloud folder" failed (folder gone,
+      // drive offline). The backup itself is safe in Saves/.
+      const onMirrorFailed = await listen<string>("backup-mirror-failed", (ev) => {
+        const lang = useAppStore.getState().language;
+        useAppStore.getState().showToast(
+          (lang === "tr"
+            ? "Yedek alındı ama yedek klasörüne kopyalanamadı: "
+            : "Backup saved, but it couldn't be copied to the mirror folder: ") + ev.payload,
+          "warning",
+        );
+      });
+      if (disposed) { onAction(); onHidden(); onMirrorFailed(); return; }
+      unlisteners.push(onAction, onHidden, onMirrorFailed);
+    })();
+    return () => { disposed = true; unlisteners.forEach((u) => u()); };
+  }, []);
+
+  // A webhook (Discord / custom) could not be delivered. Throttled so a
+  // dead endpoint doesn't toast on every completed task.
+  useEffect(() => {
+    let lastAt = 0;
+    const onFail = (e: Event) => {
+      const { target, message } = (e as CustomEvent<{ target: string; message: string }>).detail;
+      if (Date.now() - lastAt < 60_000) return;
+      lastAt = Date.now();
+      const lang = useAppStore.getState().language;
+      useAppStore.getState().showToast(
+        (lang === "tr" ? `Webhook gönderilemedi (${target}): ` : `Webhook not delivered (${target}): `) + message,
+        "warning",
+      );
+    };
+    window.addEventListener("heravex:webhook-failed", onFail);
+    return () => window.removeEventListener("heravex:webhook-failed", onFail);
+  }, []);
+
+  // Rust reports record files it could not read in time (a cloud-drive
+  // client stuck on a download). The UI shows what did load; this tells
+  // the user why something is missing and what to do. Throttled.
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let lastAt = 0;
+    void (async () => {
+      unlisten = await listen<string[]>("workspace-read-stalled", (ev) => {
+        const now = Date.now();
+        if (now - lastAt < 30_000) return;
+        lastAt = now;
+        const files = (ev.payload ?? []).slice(0, 3).join(", ");
+        const { showToast: toast, language: lang } = useAppStore.getState();
+        toast(
+          lang === "tr"
+            ? `Bazı dosyalar okunamadı (${files}). Bulut eşitleme istemcisini (Google Drive / OneDrive) yeniden başlat. Bu dosyalar silinmez.`
+            : `Some files couldn't be read (${files}). Restart your sync client (Google Drive / OneDrive). These files are not deleted.`,
+          "warning",
+        );
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
   // Silent refresh handlers — the team-sync orchestrator fires these
   // when a teammate's save touches the relevant file. We re-fetch
   // the affected slice WITHOUT bouncing the loading screen so the
   // user keeps editing without interruption.
   useEffect(() => {
-    const onGamesChanged = () => {
-      void useAppStore.getState().refreshGames(undefined, { silent: true });
+    const onGamesChanged = (e: Event) => {
+      // Targeted: re-read only the changed game files and skip our own
+      // saves echoing back. A full reload on every autosave echo was
+      // re-rendering the whole app while the user typed.
+      const ids = (e as CustomEvent<{ gameIds?: string[] }>).detail?.gameIds;
+      const store = useAppStore.getState();
+      if (ids && ids.length > 0) void store.syncGamesFromDisk(ids);
+      else void store.refreshGames(undefined, { silent: true });
     };
     window.addEventListener("heravex:games-list-changed", onGamesChanged);
     return () => window.removeEventListener("heravex:games-list-changed", onGamesChanged);
+  }, []);
+
+  // Wallet (general expenses, currency list) is per workspace since
+  // v0.9.9; reload it when the file changes (teammate or our own echo —
+  // reloading our own save is harmless).
+  useEffect(() => {
+    const onWalletChanged = () => { void useAppStore.getState().loadWallet({ silent: true }); };
+    window.addEventListener("heravex:wallet-file-changed", onWalletChanged);
+    return () => window.removeEventListener("heravex:wallet-file-changed", onWalletChanged);
   }, []);
 
   // Conflict dialog kept but only opened when something else calls it
@@ -592,6 +819,7 @@ export default function App() {
          *  "whenTaskOpen" (reserved for a future per-task chip)
          *  or "sidebarWidget" before the first activation. */}
         <PomodoroWidget />
+        <BreakLockOverlay />
         <PerformanceMonitor />
         <AutoLockOverlay />
         <QuickCaptureWidget />

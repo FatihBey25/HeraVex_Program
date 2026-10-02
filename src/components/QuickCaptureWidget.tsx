@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import { Plus, FileText, ListTodo, X } from "lucide-react";
 import { useAppStore } from "../store";
+import { requestCreate } from "../lib/createIntents";
 
 export function QuickCaptureWidget() {
   const { ui, language, general, setWorkspaceTab } = useAppStore();
@@ -43,12 +44,12 @@ export function QuickCaptureWidget() {
 
   const newNote = () => {
     setWorkspaceTab("notes");
-    window.dispatchEvent(new CustomEvent("heravex:new-note"));
+    requestCreate("note");
     setOpen(false);
   };
   const newTask = () => {
     setWorkspaceTab("tasks");
-    window.dispatchEvent(new CustomEvent("heravex:new-task"));
+    requestCreate("task");
     setOpen(false);
   };
 

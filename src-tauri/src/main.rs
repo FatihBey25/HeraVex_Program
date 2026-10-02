@@ -31,6 +31,11 @@ struct ExpenseItem {
     currency: Option<String>,
     #[serde(default)]
     is_recurring: Option<bool>,
+    /// General expenses split across games. The frontend has had this
+    /// since v0.9, but without the field here serde dropped it on every
+    /// save, so the split vanished after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_with_game_ids: Option<Vec<String>>,
 }
 
 // Moodboard data model (v0.8+):
@@ -312,6 +317,9 @@ struct VersionItem {
     build_file_name: Option<String>,
     build_relative_path: Option<String>,
     build_file_size_bytes: Option<u64>,
+    /// Set when Settings → Storage pruned this version's build file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_pruned_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +429,17 @@ struct AppSettings {
     google_play_json_path: Option<String>,
     #[serde(default)]
     workspace_path: Option<String>,
+    /// Data root that adopted the pre-workspace wallet (`global_expenses`
+    /// above). `global_expenses` itself is never cleared: it stays as a
+    /// read-only backup so an upgrade can't lose anyone's expenses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_wallet_claimed_by: Option<String>,
+    /// Settings → Privacy: API keys live in the OS keychain.
+    #[serde(default)]
+    secrets_in_keychain: bool,
+    /// Runtime only: the keychain was read successfully on load.
+    #[serde(skip)]
+    secrets_loaded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +490,10 @@ struct BackupSnapshot {
     /// as empty rather than rejecting the file.
     #[serde(default)]
     notes: Vec<NoteRecord>,
+    /// Workspace wallet (v0.9.9+). Older files carry it only inside
+    /// settings.global_expenses; the restore handles both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wallet: Option<WalletFile>,
 }
 
 fn default_release_template() -> Vec<ReleaseTemplateItem> {
@@ -675,14 +698,18 @@ fn save_single_game_to_disk(app: &AppHandle, game: &GameRecord) -> Result<(), St
     let path = games_dir(app)?.join(format!("{}.json", safe_id_filename(&game.id)));
     snapshot_before_write(&path);
     let payload = serde_json::to_string_pretty(game).map_err(|e| e.to_string())?;
-    atomic_write(&path, payload.as_bytes())
+    atomic_write(&path, payload.as_bytes())?;
+    notify_windows(app, "games", vec![game.id.clone()]);
+    Ok(())
 }
 
 fn save_single_note_to_disk(app: &AppHandle, note: &NoteRecord) -> Result<(), String> {
     let path = notes_dir(app)?.join(format!("{}.json", safe_id_filename(&note.id)));
     snapshot_before_write(&path);
     let payload = serde_json::to_string_pretty(note).map_err(|e| e.to_string())?;
-    atomic_write(&path, payload.as_bytes())
+    atomic_write(&path, payload.as_bytes())?;
+    notify_windows(app, "notes", vec![note.id.clone()]);
+    Ok(())
 }
 
 fn migrate_legacy_games(app: &AppHandle) -> Result<Option<Vec<GameRecord>>, String> {
@@ -708,15 +735,30 @@ fn migrate_legacy_notes(app: &AppHandle) -> Result<Option<Vec<NoteRecord>>, Stri
     Ok(Some(parsed))
 }
 
+/// Strict loader for read-modify-write paths: fails if ANY game file
+/// could not be read, because the follow-up `save_games_to_disk` would
+/// otherwise delete it as an "orphan".
 fn load_games_from_disk(app: &AppHandle) -> Result<Vec<GameRecord>, String> {
+    let (games, unreadable) = scan_games_from_disk(app)?;
+    if !unreadable.is_empty() {
+        return Err(unreadable_error("Oyun", &unreadable));
+    }
+    Ok(games)
+}
+
+/// Load every game file, returning the records plus the names of files
+/// that could not be read (I/O error or cloud-drive stall). Only the UI
+/// listing (`load_games`) may use a partial result.
+fn scan_games_from_disk(app: &AppHandle) -> Result<(Vec<GameRecord>, Vec<String>), String> {
     let dir = games_dir(app)?;
     let mut games: Vec<GameRecord> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
 
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-        match fs::read_to_string(&path) {
+        match read_text_guarded(&path) {
             Ok(raw) => {
                 // Pre-check for legacy moodboard format (array instead of
                 // { categories, items }). Custom `Deserialize` for
@@ -737,7 +779,7 @@ fn load_games_from_disk(app: &AppHandle) -> Result<Vec<GameRecord>, String> {
                     }
                 }
 
-                match serde_json::from_str::<GameRecord>(&raw) {
+                match parse_json_settled::<GameRecord>(&path, raw) {
                     Ok(game) => {
                         if needs_moodboard_migration {
                             // Migration already happened inside
@@ -764,7 +806,7 @@ fn load_games_from_disk(app: &AppHandle) -> Result<Vec<GameRecord>, String> {
                         let _ = fs::rename(&path, &corrupt);
                         let bak = path.with_extension("json.bak");
                         if bak.exists() {
-                            if let Ok(bak_raw) = fs::read_to_string(&bak) {
+                            if let Ok(bak_raw) = read_text_guarded(&bak) {
                                 if let Ok(game) = serde_json::from_str::<GameRecord>(&bak_raw) {
                                     let _ = fs::copy(&bak, &path);
                                     println!(
@@ -789,19 +831,23 @@ fn load_games_from_disk(app: &AppHandle) -> Result<Vec<GameRecord>, String> {
                     }
                 }
             }
-            Err(e) => println!("[load_games] read err {}: {e}", path.display()),
+            Err(ReadFail::Io(e)) => {
+                println!("[load_games] read err {}: {e}", path.display());
+                unreadable.push(file_label(&path));
+            }
+            Err(ReadFail::TimedOut) => unreadable.push(file_label(&path)),
         }
     }
 
-    if games.is_empty() {
+    if games.is_empty() && unreadable.is_empty() {
         if let Ok(Some(migrated)) = migrate_legacy_games(app) {
-            return Ok(migrated);
+            return Ok((migrated, unreadable));
         }
     }
 
     // Stable order: most recently updated first
     games.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(games)
+    Ok((games, unreadable))
 }
 
 fn save_games_to_disk(app: &AppHandle, games: &[GameRecord]) -> Result<(), String> {
@@ -823,18 +869,31 @@ fn save_games_to_disk(app: &AppHandle, games: &[GameRecord]) -> Result<(), Strin
     Ok(())
 }
 
+/// Strict loader for read-modify-write paths (see `load_games_from_disk`).
 fn load_notes_from_disk(app: &AppHandle) -> Result<Vec<NoteRecord>, String> {
+    let (notes, unreadable) = scan_notes_from_disk(app)?;
+    if !unreadable.is_empty() {
+        return Err(unreadable_error("Not", &unreadable));
+    }
+    Ok(notes)
+}
+
+fn scan_notes_from_disk(app: &AppHandle) -> Result<(Vec<NoteRecord>, Vec<String>), String> {
     let dir = notes_dir(app)?;
     let mut notes: Vec<NoteRecord> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     let entries = fs::read_dir(&dir).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-        let raw = match fs::read_to_string(&path) {
+        let raw = match read_text_guarded(&path) {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => {
+                unreadable.push(file_label(&path));
+                continue;
+            }
         };
-        match serde_json::from_str::<NoteRecord>(&raw) {
+        match parse_json_settled::<NoteRecord>(&path, raw) {
             Ok(n) => notes.push(n),
             Err(parse_err) => {
                 // v0.9.7 resilience pass — same recovery flow as
@@ -845,7 +904,7 @@ fn load_notes_from_disk(app: &AppHandle) -> Result<Vec<NoteRecord>, String> {
                 let _ = fs::rename(&path, &corrupt);
                 let bak = path.with_extension("json.bak");
                 if bak.exists() {
-                    if let Ok(bak_raw) = fs::read_to_string(&bak) {
+                    if let Ok(bak_raw) = read_text_guarded(&bak) {
                         if let Ok(n) = serde_json::from_str::<NoteRecord>(&bak_raw) {
                             let _ = fs::copy(&bak, &path);
                             println!(
@@ -865,13 +924,13 @@ fn load_notes_from_disk(app: &AppHandle) -> Result<Vec<NoteRecord>, String> {
             }
         }
     }
-    if notes.is_empty() {
+    if notes.is_empty() && unreadable.is_empty() {
         if let Ok(Some(migrated)) = migrate_legacy_notes(app) {
-            return Ok(migrated);
+            return Ok((migrated, unreadable));
         }
     }
     notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(notes)
+    Ok((notes, unreadable))
 }
 
 fn save_notes_to_disk(app: &AppHandle, notes: &[NoteRecord]) -> Result<(), String> {
@@ -915,6 +974,7 @@ fn current_user() -> String {
 }
 
 fn append_activity(app: &AppHandle, action: &str, target: Option<String>) {
+    let _activity = ACTIVITY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = match activity_log_path(app) {
         Ok(p) => p,
         Err(_) => return,
@@ -943,7 +1003,7 @@ fn append_activity(app: &AppHandle, action: &str, target: Option<String>) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_activity_log(app: AppHandle) -> Result<Vec<ActivityEntry>, String> {
     let path = activity_log_path(&app)?;
     if !path.exists() { return Ok(Vec::new()); }
@@ -967,17 +1027,345 @@ fn load_settings_from_disk(app: &AppHandle) -> Result<AppSettings, String> {
             avatar_path: None,
             google_play_json_path: None,
             workspace_path: None,
+            legacy_wallet_claimed_by: None,
+            secrets_in_keychain: false,
+            secrets_loaded: false,
         });
     }
 
     let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    serde_json::from_str(&raw).map_err(|err| err.to_string())
+    let mut settings: AppSettings = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    fill_secrets(&mut settings);
+    Ok(settings)
 }
 
 fn save_settings_to_disk(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
     let path = settings_path(app)?;
-    let payload = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
+    let on_disk = strip_secrets(settings)?;
+    let payload = serde_json::to_string_pretty(&on_disk).map_err(|err| err.to_string())?;
     atomic_write(&path, payload.as_bytes())
+}
+
+// ── OS keychain for API keys (v0.9.9, Settings → Privacy) ───────────────────
+//
+// With `secrets_in_keychain` on, the Steam / Itch API keys live in the OS
+// credential store instead of settings.json (so they're also not in
+// backups). `load_settings_from_disk` fills them back in and
+// `save_settings_to_disk` moves them out again, so no caller changes.
+// If the keychain can't be read, `secrets_loaded` stays false and a
+// save never deletes what the keychain holds.
+
+const KEYCHAIN_SERVICE: &str = "HeraVex";
+const SECRET_STEAM: &str = "steam_api_key";
+const SECRET_ITCH: &str = "itch_api_key";
+
+#[cfg(any(windows, target_os = "macos"))]
+mod os_secrets {
+    pub fn supported() -> bool { true }
+    pub fn get(name: &str) -> Result<Option<String>, String> {
+        let entry = keyring::Entry::new(super::KEYCHAIN_SERVICE, name).map_err(|e| e.to_string())?;
+        match entry.get_password() {
+            Ok(v) => Ok(Some(v)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    pub fn set(name: &str, value: Option<&str>) -> Result<(), String> {
+        let entry = keyring::Entry::new(super::KEYCHAIN_SERVICE, name).map_err(|e| e.to_string())?;
+        match value {
+            Some(v) => entry.set_password(v).map_err(|e| e.to_string()),
+            None => match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+mod os_secrets {
+    pub fn supported() -> bool { false }
+    pub fn get(_name: &str) -> Result<Option<String>, String> { Ok(None) }
+    pub fn set(_name: &str, _value: Option<&str>) -> Result<(), String> {
+        Err("Bu sistemde anahtar zinciri desteklenmiyor.".into())
+    }
+}
+
+/// Fill the keychain-held secrets into freshly parsed settings.
+fn fill_secrets(settings: &mut AppSettings) {
+    if !settings.secrets_in_keychain {
+        return;
+    }
+    let steam = os_secrets::get(SECRET_STEAM);
+    let itch = os_secrets::get(SECRET_ITCH);
+    match (steam, itch) {
+        (Ok(s), Ok(i)) => {
+            if settings.steam_api_key.is_none() { settings.steam_api_key = s; }
+            if settings.itch_api_key.is_none() { settings.itch_api_key = i; }
+            settings.secrets_loaded = true;
+        }
+        (s, i) => {
+            eprintln!("[keychain] read failed: {:?} {:?}", s.err(), i.err());
+        }
+    }
+}
+
+/// Move secrets into the keychain before settings.json is written.
+/// Returns the copy to write (without secrets).
+fn strip_secrets(settings: &AppSettings) -> Result<AppSettings, String> {
+    let mut out = settings.clone();
+    if !settings.secrets_in_keychain {
+        return Ok(out);
+    }
+    for (name, value) in [(SECRET_STEAM, settings.steam_api_key.as_deref()), (SECRET_ITCH, settings.itch_api_key.as_deref())] {
+        match value {
+            // Skip the write when the keychain already holds this value.
+            Some(v) => {
+                if os_secrets::get(name).ok().flatten().as_deref() != Some(v) {
+                    os_secrets::set(name, Some(v))?;
+                }
+            }
+            // Only a successful load proves the user cleared the key;
+            // otherwise None just means "couldn't read it".
+            None if settings.secrets_loaded => os_secrets::set(name, None)?,
+            None => {}
+        }
+    }
+    out.steam_api_key = None;
+    out.itch_api_key = None;
+    Ok(out)
+}
+
+/// Keys kept in the keychain stay out of backups too.
+fn settings_for_backup(mut s: AppSettings) -> AppSettings {
+    if s.secrets_in_keychain {
+        s.steam_api_key = None;
+        s.itch_api_key = None;
+    }
+    s
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KeychainStatus {
+    supported: bool,
+    enabled: bool,
+}
+
+#[tauri::command]
+fn keychain_status(app: AppHandle) -> Result<KeychainStatus, String> {
+    let settings = load_settings_from_disk(&app)?;
+    Ok(KeychainStatus { supported: os_secrets::supported(), enabled: settings.secrets_in_keychain })
+}
+
+#[tauri::command]
+fn set_secrets_in_keychain(app: AppHandle, enabled: bool) -> Result<KeychainStatus, String> {
+    if enabled && !os_secrets::supported() {
+        return Err("Bu sistemde anahtar zinciri desteklenmiyor.".into());
+    }
+    let mut settings = load_settings_from_disk(&app)?;
+    if settings.secrets_in_keychain == enabled {
+        return Ok(KeychainStatus { supported: os_secrets::supported(), enabled });
+    }
+    if enabled {
+        let steam = settings.steam_api_key.clone();
+        let itch = settings.itch_api_key.clone();
+        settings.secrets_in_keychain = true;
+        settings.secrets_loaded = true;
+        save_settings_to_disk(&app, &settings)?;
+        // Read back; on any mismatch put the keys back in the file.
+        let ok = os_secrets::get(SECRET_STEAM).ok() == Some(steam.clone())
+            && os_secrets::get(SECRET_ITCH).ok() == Some(itch.clone());
+        if !ok {
+            settings.secrets_in_keychain = false;
+            settings.steam_api_key = steam;
+            settings.itch_api_key = itch;
+            save_settings_to_disk(&app, &settings)?;
+            return Err("Anahtarlar anahtar zincirine yazilamadi; dosyada birakildi.".into());
+        }
+    } else {
+        if settings.secrets_in_keychain && !settings.secrets_loaded {
+            return Err("Anahtar zinciri okunamadi; anahtarlar kaybolmasin diye ayar degistirilmedi.".into());
+        }
+        settings.secrets_in_keychain = false;
+        save_settings_to_disk(&app, &settings)?; // keys back into the file
+        let _ = os_secrets::set(SECRET_STEAM, None);
+        let _ = os_secrets::set(SECRET_ITCH, None);
+    }
+    Ok(KeychainStatus { supported: os_secrets::supported(), enabled })
+}
+
+
+/// Team-mode responsiveness fix: the workspace commands used to be plain
+/// `#[tauri::command]`, which Tauri runs ON THE MAIN THREAD. On a
+/// cloud-synced folder (Google Drive / OneDrive virtual drives) a single
+/// read can stall for hundreds of ms and `atomic_write` sleeps through
+/// lock retries — every one of those froze the window, which users felt
+/// as "typing stutters". Those commands now run on the async runtime.
+///
+/// Running on the main thread also gave us free serialization (no two
+/// commands could interleave a read-modify-write of the same game file).
+/// This process-wide lock preserves exactly that guarantee off the main
+/// thread. No command calls another command, so it is never re-entered.
+/// A poisoned lock (panic in a previous holder) is recovered, not fatal.
+static IO_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn io_lock() -> std::sync::MutexGuard<'static, ()> {
+    IO_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `activity.json` is a shared read-modify-write file appended from many
+/// commands; it gets its own lock so concurrent appends don't drop rows.
+static ACTIVITY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Image paths (covers, moodboard) are stored as ABSOLUTE paths, so a
+/// path written by a teammate points into THEIR machine's sync folder
+/// (`C:\Users\ali\Google Drive\HeraVex\library\...`). Re-anchor any
+/// `.../library/<game>/...` path onto this machine's workspace root when
+/// the original doesn't exist here. Mirrors `remapWorkspaceAsset` in
+/// `src/lib/images.ts`.
+fn resolve_workspace_asset(app: &AppHandle, raw: &str) -> PathBuf {
+    let original = PathBuf::from(raw);
+    if original.is_absolute() && original.exists() {
+        return original;
+    }
+    let norm = raw.replace('\\', "/");
+    let tail = if norm.starts_with("library/") {
+        Some(norm.clone())
+    } else {
+        norm.rfind("/library/").map(|i| norm[i + 1..].to_string())
+    };
+    if let (Some(tail), Ok(root)) = (tail, data_root(app)) {
+        let mut candidate = root.clone();
+        for seg in tail.split('/').filter(|s| !s.is_empty() && *s != "..") {
+            candidate.push(seg);
+        }
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    original
+}
+
+/// Cloud-drive read guard. A virtual-drive client (Google Drive for
+/// desktop, OneDrive Files-On-Demand) can block `read` FOREVER when it
+/// cannot fetch a file's content — the directory lists fine, but opening
+/// one file never returns. Seen in the field: the whole app sat on the
+/// "Preparing HeraVex" screen because the first game file never loaded.
+///
+/// Reads therefore run on a helper thread with a deadline. On timeout the
+/// helper thread is abandoned (it stays parked in the OS call; nothing we
+/// can do about that) and the caller gets `ReadFail::TimedOut`. After one
+/// stall the deadline drops sharply for the next minute so a stuck drive
+/// costs seconds, not minutes, across many files.
+enum ReadFail {
+    Io(String),
+    TimedOut,
+}
+
+static LAST_READ_STALL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Paths whose abandoned read thread is still parked in the OS. A new
+/// read of the same path fails fast instead of parking another thread,
+/// so a stuck drive + the 30s heartbeat can't leak threads forever. The
+/// reader removes its path once the OS call finally returns.
+static STALLED_READS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn read_text_guarded(path: &Path) -> Result<String, ReadFail> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let recently_stalled = now_ms().saturating_sub(LAST_READ_STALL_MS.load(Ordering::Relaxed)) < 60_000;
+    let deadline = std::time::Duration::from_millis(if recently_stalled { 1_500 } else { 12_000 });
+    let owned = path.to_path_buf();
+    {
+        let stalled = STALLED_READS.lock().unwrap_or_else(|e| e.into_inner());
+        if stalled.iter().any(|p| p == &owned) {
+            return Err(ReadFail::TimedOut);
+        }
+    }
+    // `done` and the stall marker are only touched under STALLED_READS,
+    // so "reader finished" and "caller gave up" can't interleave badly:
+    // either the reader clears the marker after the caller set it, or the
+    // caller sees `done` and never sets it.
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread_path = owned.clone();
+    let thread_done = done.clone();
+    let spawned = std::thread::Builder::new()
+        .name("hv-read".into())
+        .spawn(move || {
+            let res = fs::read_to_string(&thread_path);
+            {
+                let mut stalled = STALLED_READS.lock().unwrap_or_else(|e| e.into_inner());
+                thread_done.store(true, Ordering::SeqCst);
+                stalled.retain(|p| p != &thread_path);
+            }
+            let _ = tx.send(res);
+        });
+    if spawned.is_err() {
+        // Couldn't spawn (resource exhaustion) — fall back to a plain read.
+        return fs::read_to_string(path).map_err(|e| ReadFail::Io(e.to_string()));
+    }
+    match rx.recv_timeout(deadline) {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(e)) => Err(ReadFail::Io(e.to_string())),
+        Err(_) => {
+            {
+                let mut stalled = STALLED_READS.lock().unwrap_or_else(|e| e.into_inner());
+                if !done.load(Ordering::SeqCst) && !stalled.iter().any(|p| p == &owned) {
+                    stalled.push(owned.clone());
+                }
+            }
+            // The read may have finished in the gap; use it if so.
+            if let Ok(res) = rx.try_recv() {
+                return res.map_err(|e| ReadFail::Io(e.to_string()));
+            }
+            LAST_READ_STALL_MS.store(now_ms(), Ordering::Relaxed);
+            eprintln!("[read] TIMED OUT after {:?}: {}", deadline, path.display());
+            Err(ReadFail::TimedOut)
+        }
+    }
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string()
+}
+
+/// Turn a list of unreadable record files into the error a WRITE path
+/// returns. Bulk writers (`save_games_to_disk`, `save_notes_to_disk`)
+/// delete every file not in the list they were handed, so writing after a
+/// partial load would DELETE the records we failed to read. Refuse instead.
+fn unreadable_error(kind: &str, files: &[String]) -> String {
+    format!(
+        "{kind} dosyalari okunamadi (bulut esitleme istemcisi yanit vermiyor): {}. \
+         Veri kaybini onlemek icin islem durduruldu. Google Drive / OneDrive'i yeniden baslatip tekrar dene.",
+        files.join(", ")
+    )
+}
+
+/// Parse a JSON record, re-reading once after a short pause when the
+/// first parse fails. Cloud clients replace files in place while
+/// downloading, so a read can catch a half-written file; treating that
+/// as corruption would rename the live file and push an OLD `.bak` to
+/// the whole team. Only a file that is still unparsable after the
+/// pause goes through the corruption-recovery path.
+fn parse_json_settled<T: serde::de::DeserializeOwned>(path: &Path, raw: String) -> Result<T, serde_json::Error> {
+    match serde_json::from_str::<T>(&raw) {
+        Ok(v) => Ok(v),
+        Err(first_err) => {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            match read_text_guarded(path) {
+                Ok(again) => serde_json::from_str::<T>(&again),
+                Err(_) => Err(first_err),
+            }
+        }
+    }
 }
 
 /// Process-wide counter for unique `.tmp` suffixes — combined with
@@ -1121,13 +1509,44 @@ fn validate_relative_backup_path(path: &str) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_games(app: AppHandle) -> Result<Vec<GameRecord>, String> {
-    load_games_from_disk(&app)
+    let _io = io_lock();
+    // UI listing may show a partial library: better than an app that
+    // never opens. The skipped files are reported so the shell can warn;
+    // every WRITE path still uses the strict loader.
+    let (games, unreadable) = scan_games_from_disk(&app)?;
+    if !unreadable.is_empty() {
+        let _ = app.emit("workspace-read-stalled", unreadable);
+    }
+    Ok(games)
 }
 
-#[tauri::command]
+/// Team-mode targeted reload: read only the game files a teammate just
+/// changed instead of re-reading the whole library on every sync tick.
+/// Ids whose file is missing are simply absent from the result; the
+/// frontend falls back to a full reload in that case.
+#[tauri::command(async)]
+fn load_games_by_ids(app: AppHandle, ids: Vec<String>) -> Result<Vec<GameRecord>, String> {
+    let _io = io_lock();
+    let dir = games_dir(&app)?;
+    let mut out = Vec::new();
+    for id in ids {
+        let path = dir.join(format!("{}.json", safe_id_filename(&id)));
+        let raw = match read_text_guarded(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if let Ok(game) = parse_json_settled::<GameRecord>(&path, raw) {
+            out.push(game);
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command(async)]
 fn create_game(app: AppHandle, input: CreateGameInput) -> Result<GameRecord, String> {
+    let _io = io_lock();
     if input.title.trim().is_empty() {
         return Err("Oyun basligi bos olamaz.".into());
     }
@@ -1211,8 +1630,9 @@ fn create_game(app: AppHandle, input: CreateGameInput) -> Result<GameRecord, Str
 /// files for separate concerns (notes vs games vs members).
 static WORKSPACE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_game(app: AppHandle, mut game: GameRecord) -> Result<GameRecord, String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut games = load_games_from_disk(&app)?;
@@ -1244,6 +1664,7 @@ fn add_version_with_build(
     game_id: String,
     version: String,
     notes: String,
+    keep_builds: Option<u32>,
 ) -> Result<GameRecord, String> {
     if version.trim().is_empty() {
         return Err("Surum bos olamaz.".into());
@@ -1254,6 +1675,7 @@ fn add_version_with_build(
         .pick_file()
         .ok_or_else(|| "Build secimi iptal edildi.".to_string())?;
 
+    let _io = io_lock();
     let mut games = load_games_from_disk(&app)?;
     let index = games
         .iter()
@@ -1294,11 +1716,17 @@ fn add_version_with_build(
                 .map_err(|err| err.to_string())?
                 .len(),
         ),
+        build_pruned_at: None,
     };
 
     game.current_build_relative_path = Some(relative);
     game.updated_at = now_iso();
     game.versions.insert(0, version_item);
+    // Settings → Storage "Auto-prune old versions".
+    if let Some(keep) = keep_builds.filter(|k| *k > 0) {
+        let mut res = PruneResult::default();
+        prune_game_builds(&library_dir(&app)?, &mut game, keep as usize, &mut res);
+    }
     games[index] = game.clone();
     save_games_to_disk(&app, &games)?;
     Ok(game)
@@ -1326,6 +1754,7 @@ fn open_current_build(app: AppHandle, game_id: String) -> Result<(), String> {
 
 #[tauri::command]
 fn delete_version(app: AppHandle, game_id: String, version_id: String) -> Result<GameRecord, String> {
+    let _io = io_lock();
     let mut games = load_games_from_disk(&app)?;
     let index = games
         .iter()
@@ -1410,13 +1839,11 @@ fn set_preferred_language(app: AppHandle, language: String) -> Result<(), String
     save_settings_to_disk(&app, &settings)
 }
 
-#[tauri::command]
+/// Whole-list write, kept for older callers. Writes the ACTIVE
+/// workspace's wallet; the app itself uses the per-item commands below.
+#[tauri::command(async)]
 fn save_global_expenses(app: AppHandle, expenses: Vec<ExpenseItem>) -> Result<(), String> {
-    let _guard = WORKSPACE_WRITE_LOCK.lock()
-        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
-    let mut settings = load_settings_from_disk(&app)?;
-    settings.global_expenses = expenses;
-    save_settings_to_disk(&app, &settings)
+    mutate_wallet(&app, |w| w.global_expenses = expenses).map(|_| ())
 }
 
 #[tauri::command]
@@ -1426,6 +1853,280 @@ fn save_exchange_rates(app: AppHandle, rates: std::collections::HashMap<String, 
     let mut settings = load_settings_from_disk(&app)?;
     settings.exchange_rates = Some(rates);
     save_settings_to_disk(&app, &settings)
+}
+
+// ── Workspace wallet (v0.9.9) ───────────────────────────────────────────────
+//
+// General (non-project) expenses and the wallet's currency list belong to a
+// workspace, in `<data root>/wallet.json`. Project expenses already live on
+// each game. Before v0.9.9 the general expenses sat in the app-wide
+// settings.json, so every workspace showed the same wallet.
+//
+// Upgrade safety:
+//   * The first workspace that opens after the upgrade (and is not a team
+//     folder: personal expenses must not leak to teammates) adopts the old
+//     list. `settings.legacy_wallet_claimed_by` records which one.
+//   * `settings.global_expenses` is never cleared. Another workspace can
+//     still copy it in by hand (`import_legacy_wallet`) while nobody has
+//     adopted it, or when the adopting folder is gone.
+//   * Expenses are added / changed / removed one at a time against the
+//     file on disk, never by overwriting the whole list from memory, so a
+//     failed or stale load can't wipe the file. An unreadable wallet.json
+//     is an error, never treated as empty.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletFile {
+    #[serde(default = "wallet_file_version")]
+    version: u32,
+    #[serde(default)]
+    global_expenses: Vec<ExpenseItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_currencies: Option<Vec<String>>,
+}
+
+fn wallet_file_version() -> u32 { 1 }
+
+impl Default for WalletFile {
+    fn default() -> Self {
+        WalletFile { version: 1, global_expenses: Vec::new(), active_currencies: None }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletLoad {
+    global_expenses: Vec<ExpenseItem>,
+    active_currencies: Option<Vec<String>>,
+    /// Old (pre-workspace) expenses this workspace could still copy in.
+    legacy_available: usize,
+    /// True when this load just adopted the old wallet.
+    migrated: bool,
+}
+
+fn wallet_path(root: &Path) -> PathBuf {
+    root.join("wallet.json")
+}
+
+/// `Ok(None)` = no wallet.json yet. Unreadable / corrupt = `Err`, so a
+/// caller can never mistake it for an empty wallet and overwrite it.
+fn read_wallet(root: &Path) -> Result<Option<WalletFile>, String> {
+    let path = wallet_path(root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = match read_text_guarded(&path) {
+        Ok(raw) => raw,
+        Err(ReadFail::TimedOut) => {
+            return Err("wallet.json okunamadi (bulut surucusu yanit vermiyor).".into())
+        }
+        Err(ReadFail::Io(e)) => return Err(format!("wallet.json okunamadi: {e}")),
+    };
+    if raw.trim().is_empty() {
+        return Ok(Some(WalletFile::default()));
+    }
+    serde_json::from_str::<WalletFile>(&raw)
+        .map(Some)
+        .map_err(|e| format!("wallet.json bozuk: {e}"))
+}
+
+fn write_wallet(root: &Path, wallet: &WalletFile) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(wallet).map_err(|e| e.to_string())?;
+    atomic_write(&wallet_path(root), &payload)
+}
+
+fn same_root(a: &str, b: &Path) -> bool {
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    norm(a) == norm(&b.to_string_lossy())
+}
+
+/// A team folder has a members file / folder at its root.
+fn is_team_root(root: &Path) -> bool {
+    root.join("heravex-members.json").exists() || root.join("heravex-members").is_dir()
+}
+
+/// Old expenses not yet in `wallet`, offered only while nobody adopted
+/// them or the folder that did is gone.
+fn legacy_offer(settings: &AppSettings, root: &Path, wallet: &WalletFile) -> usize {
+    if settings.global_expenses.is_empty() {
+        return 0;
+    }
+    if let Some(owner) = settings.legacy_wallet_claimed_by.as_deref() {
+        if same_root(owner, root) || Path::new(owner).is_dir() {
+            return 0;
+        }
+    }
+    settings
+        .global_expenses
+        .iter()
+        .filter(|e| !wallet.global_expenses.iter().any(|w| w.id == e.id))
+        .count()
+}
+
+fn wallet_write_guard() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))
+}
+
+/// Load the wallet at `root`, adopting the old wallet when allowed. On
+/// adoption `settings` gets the claim marker and `migrated` is true; the
+/// caller must then save settings.
+fn load_wallet_at(root: &Path, settings: &mut AppSettings, claim_legacy: bool) -> Result<WalletLoad, String> {
+    let mut migrated = false;
+    let wallet = match read_wallet(root)? {
+        Some(w) => w,
+        None => {
+            let adopt = claim_legacy
+                && settings.legacy_wallet_claimed_by.is_none()
+                && !settings.global_expenses.is_empty()
+                && !is_team_root(root);
+            if adopt {
+                let w = WalletFile {
+                    version: 1,
+                    global_expenses: settings.global_expenses.clone(),
+                    active_currencies: None,
+                };
+                write_wallet(root, &w)?;
+                settings.legacy_wallet_claimed_by = Some(root.to_string_lossy().to_string());
+                migrated = true;
+                w
+            } else {
+                WalletFile::default()
+            }
+        }
+    };
+    Ok(WalletLoad {
+        legacy_available: legacy_offer(settings, root, &wallet),
+        global_expenses: wallet.global_expenses,
+        active_currencies: wallet.active_currencies,
+        migrated,
+    })
+}
+
+#[tauri::command(async)]
+fn load_wallet(app: AppHandle, claim_legacy: Option<bool>) -> Result<WalletLoad, String> {
+    let _io = io_lock();
+    let _guard = wallet_write_guard()?;
+    let root = data_root(&app)?;
+    let mut settings = load_settings_from_disk(&app)?;
+    let loaded = load_wallet_at(&root, &mut settings, claim_legacy.unwrap_or(false))?;
+    if loaded.migrated {
+        save_settings_to_disk(&app, &settings)?;
+    }
+    Ok(loaded)
+}
+
+/// Read-modify-write on the file; returns the wallet as saved.
+fn mutate_wallet<F>(app: &AppHandle, f: F) -> Result<WalletFile, String>
+where
+    F: FnOnce(&mut WalletFile),
+{
+    let _io = io_lock();
+    let _guard = wallet_write_guard()?;
+    let root = data_root(app)?;
+    let mut wallet = read_wallet(&root)?.unwrap_or_default();
+    f(&mut wallet);
+    write_wallet(&root, &wallet)?;
+    notify_windows(app, "wallet", Vec::new());
+    Ok(wallet)
+}
+
+/// Add (at the top) or replace by id.
+#[tauri::command(async)]
+fn wallet_upsert_expense(app: AppHandle, expense: ExpenseItem) -> Result<Vec<ExpenseItem>, String> {
+    mutate_wallet(&app, |w| {
+        if let Some(slot) = w.global_expenses.iter_mut().find(|e| e.id == expense.id) {
+            *slot = expense;
+        } else {
+            w.global_expenses.insert(0, expense);
+        }
+    })
+    .map(|w| w.global_expenses)
+}
+
+#[tauri::command(async)]
+fn wallet_delete_expense(app: AppHandle, expense_id: String) -> Result<Vec<ExpenseItem>, String> {
+    mutate_wallet(&app, |w| w.global_expenses.retain(|e| e.id != expense_id))
+        .map(|w| w.global_expenses)
+}
+
+#[tauri::command(async)]
+fn wallet_set_currencies(app: AppHandle, currencies: Vec<String>) -> Result<(), String> {
+    mutate_wallet(&app, |w| w.active_currencies = Some(currencies)).map(|_| ())
+}
+
+/// Copy the old (pre-workspace) expenses into the active workspace,
+/// skipping ids it already has. The old list itself stays untouched.
+#[tauri::command(async)]
+fn import_legacy_wallet(app: AppHandle) -> Result<Vec<ExpenseItem>, String> {
+    let legacy = load_settings_from_disk(&app)?.global_expenses;
+    let wallet = mutate_wallet(&app, |w| {
+        for e in legacy.into_iter().rev() {
+            if !w.global_expenses.iter().any(|x| x.id == e.id) {
+                w.global_expenses.insert(0, e);
+            }
+        }
+    })?;
+    let _io = io_lock();
+    let _guard = wallet_write_guard()?;
+    let mut settings = load_settings_from_disk(&app)?;
+    let owner_gone = settings
+        .legacy_wallet_claimed_by
+        .as_deref()
+        .map_or(true, |o| !Path::new(o).is_dir());
+    if owner_gone {
+        settings.legacy_wallet_claimed_by = Some(data_root(&app)?.to_string_lossy().to_string());
+        save_settings_to_disk(&app, &settings)?;
+    }
+    Ok(wallet.global_expenses)
+}
+
+/// A restored backup must not silently turn the keychain off (keys would
+/// land back in settings.json) or on. Keys the backup carries in plain
+/// text win over the keychain's (that is what the user restored).
+fn keep_keychain_choice(restored: &mut AppSettings, current: Option<&AppSettings>) {
+    let Some(cur) = current else { return };
+    restored.secrets_in_keychain = cur.secrets_in_keychain;
+    restored.secrets_loaded = cur.secrets_loaded;
+    if restored.steam_api_key.is_none() { restored.steam_api_key = cur.steam_api_key.clone(); }
+    if restored.itch_api_key.is_none() { restored.itch_api_key = cur.itch_api_key.clone(); }
+}
+
+/// Backup restore: write the backup's wallet into the active workspace.
+/// Backups made before v0.9.9 carry it only as `settings.global_expenses`.
+/// The adoption marker of the CURRENT install wins, so restoring an old
+/// backup can't make a second workspace adopt the old list again.
+fn restore_wallet_from_backup(
+    app: &AppHandle,
+    wallet: Option<WalletFile>,
+    restored: AppSettings,
+    current_claim: Option<String>,
+) -> Result<AppSettings, String> {
+    restore_wallet_at(&data_root(app)?, wallet, restored, current_claim)
+}
+
+fn restore_wallet_at(
+    root: &Path,
+    wallet: Option<WalletFile>,
+    mut restored: AppSettings,
+    current_claim: Option<String>,
+) -> Result<AppSettings, String> {
+    let wallet = match wallet {
+        Some(w) => Some(w),
+        None if !restored.global_expenses.is_empty() => Some(WalletFile {
+            version: 1,
+            global_expenses: restored.global_expenses.clone(),
+            active_currencies: None,
+        }),
+        None => None,
+    };
+    let wrote = wallet.is_some();
+    if let Some(w) = wallet {
+        write_wallet(root, &w)?;
+    }
+    restored.legacy_wallet_claimed_by = current_claim
+        .or(restored.legacy_wallet_claimed_by.take())
+        .or_else(|| wrote.then(|| root.to_string_lossy().to_string()));
+    Ok(restored)
 }
 
 // ── Team workspace members file (v0.9.7) ────────────────────────────────────
@@ -1441,8 +2142,9 @@ fn save_exchange_rates(app: AppHandle, rates: std::collections::HashMap<String, 
 // the active workspace is a team folder, and pinning the path argument
 // keeps these commands testable in isolation.
 
-#[tauri::command]
+#[tauri::command(async)]
 fn team_read_members(workspace_path: String) -> Result<String, String> {
+    let _io = io_lock();
     let path = std::path::PathBuf::from(&workspace_path).join("heravex-members.json");
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
@@ -1470,8 +2172,9 @@ struct MembersReadResult {
     mtime: u64,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn team_read_members_versioned(workspace_path: String) -> Result<MembersReadResult, String> {
+    let _io = io_lock();
     let path = std::path::PathBuf::from(&workspace_path).join("heravex-members.json");
     match std::fs::read(&path) {
         Ok(bytes) => {
@@ -1490,8 +2193,9 @@ fn team_read_members_versioned(workspace_path: String) -> Result<MembersReadResu
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn team_write_members(workspace_path: String, content: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = std::path::PathBuf::from(&workspace_path);
@@ -1509,8 +2213,9 @@ fn team_write_members(workspace_path: String, content: String) -> Result<(), Str
 /// Compare-And-Swap write: only succeeds if the current mtime
 /// matches `expected_mtime`. Returns Err with a specific marker
 /// string the frontend can detect and retry.
-#[tauri::command]
+#[tauri::command(async)]
 fn team_write_members_cas(workspace_path: String, content: String, expected_mtime: u64) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = std::path::PathBuf::from(&workspace_path);
@@ -1565,8 +2270,9 @@ struct TeamReadResult {
 }
 
 /// Write the caller's OWN presence file. Atomic; never touches others'.
-#[tauri::command]
+#[tauri::command(async)]
 fn team_write_self(workspace_path: String, user_id: String, content: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = team_members_dir(&workspace_path)?;
     let target = dir.join(format!("{}.json", safe_id_filename(&user_id)));
@@ -1575,8 +2281,9 @@ fn team_write_self(workspace_path: String, user_id: String, content: String) -> 
 }
 
 /// Leader-only: write the shared role-overrides file (single writer).
-#[tauri::command]
+#[tauri::command(async)]
 fn team_write_roles(workspace_path: String, content: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = team_members_dir(&workspace_path)?;
     let target = dir.join("_roles.json");
@@ -1587,8 +2294,9 @@ fn team_write_roles(workspace_path: String, content: String) -> Result<(), Strin
 /// Leader-only: remove a member's presence file (kick). If that member
 /// is still active their next heartbeat re-creates it — banning via the
 /// roles file is the permanent option.
-#[tauri::command]
+#[tauri::command(async)]
 fn team_remove_member_file(workspace_path: String, user_id: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = team_members_dir(&workspace_path)?;
     let target = dir.join(format!("{}.json", safe_id_filename(&user_id)));
@@ -1598,8 +2306,9 @@ fn team_remove_member_file(workspace_path: String, user_id: String) -> Result<()
 
 /// Read the whole team: every presence file + the roles file. Tolerant —
 /// a half-written file (cloud mid-sync) is skipped, not fatal.
-#[tauri::command]
+#[tauri::command(async)]
 fn team_read_team(workspace_path: String) -> Result<TeamReadResult, String> {
+    let _io = io_lock();
     let dir = PathBuf::from(&workspace_path).join("heravex-members");
     if !dir.is_dir() {
         return Ok(TeamReadResult { members: Vec::new(), roles: None });
@@ -1611,7 +2320,7 @@ fn team_read_team(workspace_path: String) -> Result<TeamReadResult, String> {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let content = match fs::read_to_string(&path) { Ok(c) => c, Err(_) => continue };
+            let content = match read_text_guarded(&path) { Ok(c) => c, Err(_) => continue };
             if name == "_roles.json" {
                 roles = Some(content);
             } else {
@@ -1857,8 +2566,9 @@ fn save_currency_labels(app: AppHandle, label1: String, label2: String) -> Resul
     save_settings_to_disk(&app, &settings)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_game(app: AppHandle, game_id: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut games = load_games_from_disk(&app)?;
@@ -1875,6 +2585,7 @@ fn delete_game(app: AppHandle, game_id: String) -> Result<(), String> {
     games.retain(|g| g.id != game_id);
     save_games_to_disk(&app, &games)?;
     append_activity(&app, "game.deleted", removed_title);
+    notify_windows(&app, "games", Vec::new());
     Ok(())
 }
 
@@ -1928,7 +2639,8 @@ fn perform_silent_backup(app: &AppHandle, prefix: &str) -> Result<String, String
 
     let games    = load_games_from_disk(app)?;
     let notes    = load_notes_from_disk(app).unwrap_or_default();
-    let settings = load_settings_from_disk(app)?;
+    let settings = settings_for_backup(load_settings_from_disk(app)?);
+    let wallet   = read_wallet(&data_root(app)?)?;
 
     // Manifest carries everything except binary library content. The
     // matching import command reconstructs the workspace by writing
@@ -1939,6 +2651,7 @@ fn perform_silent_backup(app: &AppHandle, prefix: &str) -> Result<String, String
         "settings": settings,
         "games":    games,
         "notes":    notes,
+        "wallet":   wallet,
     });
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
 
@@ -2014,7 +2727,11 @@ fn perform_silent_backup(app: &AppHandle, prefix: &str) -> Result<String, String
 /// the UI never freezes during a multi-megabyte serialisation. The
 /// return value is the resolved file path or an error string.
 #[tauri::command]
-async fn export_backup_silent(app: AppHandle, prefix: Option<String>) -> Result<String, String> {
+async fn export_backup_silent(
+    app: AppHandle,
+    prefix: Option<String>,
+    housekeeping: Option<BackupHousekeeping>,
+) -> Result<String, String> {
     let prefix = prefix.unwrap_or_else(|| "auto".into());
     // `tauri::async_runtime::spawn_blocking` parks the work on Tauri's
     // dedicated blocking pool — same one fs/sqlite use — so we don't
@@ -2022,7 +2739,11 @@ async fn export_backup_silent(app: AppHandle, prefix: Option<String>) -> Result<
     // frontend just sees a regular Promise that resolves when done.
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        perform_silent_backup(&app_clone, &prefix)
+        let path = perform_silent_backup(&app_clone, &prefix)?;
+        if let Some(hk) = housekeeping {
+            run_backup_housekeeping(&app_clone, Path::new(&path), &hk);
+        }
+        Ok(path)
     })
     .await
     .map_err(|e| format!("backup thread join failed: {e}"))?
@@ -2042,7 +2763,7 @@ fn export_backup(app: AppHandle) -> Result<String, String> {
 
     let games = load_games_from_disk(&app)?;
     let notes = load_notes_from_disk(&app).unwrap_or_default();
-    let settings = load_settings_from_disk(&app)?;
+    let settings = settings_for_backup(load_settings_from_disk(&app)?);
     let library = library_dir(&app)?;
     let mut files = Vec::new();
 
@@ -2055,6 +2776,7 @@ fn export_backup(app: AppHandle) -> Result<String, String> {
         games,
         files,
         notes,
+        wallet: read_wallet(&data_root(&app)?)?,
     };
 
     let payload = serde_json::to_string_pretty(&snapshot).map_err(|err| err.to_string())?;
@@ -2154,6 +2876,15 @@ fn import_backup_zip(app: &AppHandle, archive_path: &Path) -> Result<(), String>
     if let Some(settings_val) = manifest.get("settings") {
         let settings: AppSettings = serde_json::from_value(settings_val.clone())
             .map_err(|e| e.to_string())?;
+        let current = load_settings_from_disk(app).ok();
+        let current_claim = current.as_ref().and_then(|s| s.legacy_wallet_claimed_by.clone());
+        let mut settings = settings;
+        keep_keychain_choice(&mut settings, current.as_ref());
+        let wallet: Option<WalletFile> = match manifest.get("wallet").filter(|v| !v.is_null()) {
+            Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| format!("wallet: {e}"))?),
+            None => None,
+        };
+        let settings = restore_wallet_from_backup(app, wallet, settings, current_claim)?;
         save_settings_to_disk(app, &settings)?;
     }
     Ok(())
@@ -2186,12 +2917,18 @@ fn import_backup_legacy_json(app: &AppHandle, json_path: &Path) -> Result<(), St
     }
     save_games_to_disk(app, &snapshot.games)?;
     save_notes_to_disk(app, &snapshot.notes)?;
-    save_settings_to_disk(app, &snapshot.settings)?;
+    let current = load_settings_from_disk(app).ok();
+    let current_claim = current.as_ref().and_then(|s| s.legacy_wallet_claimed_by.clone());
+    let mut restored = snapshot.settings;
+    keep_keychain_choice(&mut restored, current.as_ref());
+    let settings = restore_wallet_from_backup(app, snapshot.wallet, restored, current_claim)?;
+    save_settings_to_disk(app, &settings)?;
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_image_to_disk(app: AppHandle, base64_data: String, game_id: String) -> Result<String, String> {
+    let _io = io_lock();
     // Strip the data-URL header (data:image/png;base64,...) if present
     let (raw_b64, ext) = if let Some(comma) = base64_data.find(',') {
         let header = &base64_data[..comma];
@@ -2461,6 +3198,47 @@ fn pick_and_save_avatar(app: AppHandle) -> Result<String, String> {
     Ok(path_str)
 }
 
+/// Settings → Studio → Studio logo. The image is copied into the
+/// app-local `assets/studio/` folder (the studio identity is per machine,
+/// like the avatar) so the original can be moved or deleted. The previous
+/// logo file is removed when it lives in that folder.
+#[tauri::command]
+fn pick_and_save_studio_logo(app: AppHandle, previous: Option<String>) -> Result<String, String> {
+    let picked = FileDialog::new()
+        .set_title("Studyo logosu sec")
+        .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "svg"])
+        .pick_file()
+        .ok_or_else(|| "Logo secimi iptal edildi.".to_string())?;
+    let ext = picked
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png")
+        .to_lowercase();
+    let dir = root_dir(&app)?.join("assets").join("studio");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let target = dir.join(format!("logo_{}.{ext}", Utc::now().timestamp_millis()));
+    fs::copy(&picked, &target).map_err(|e| format!("Kopyalama hatasi: {e}"))?;
+    if let Some(prev) = previous.filter(|p| !p.is_empty()) {
+        remove_studio_logo_file(&dir, &prev);
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn clear_studio_logo(app: AppHandle, path: String) -> Result<(), String> {
+    let dir = root_dir(&app)?.join("assets").join("studio");
+    remove_studio_logo_file(&dir, &path);
+    Ok(())
+}
+
+/// Only ever deletes files inside our own `assets/studio/` folder.
+fn remove_studio_logo_file(dir: &Path, path: &str) {
+    let p = PathBuf::from(path);
+    if p.parent().map_or(false, |parent| parent == dir) && p.is_file() {
+        let _ = fs::remove_file(p);
+    }
+}
+
 #[tauri::command]
 fn clear_avatar(app: AppHandle) -> Result<(), String> {
     let mut settings = load_settings_from_disk(&app)?;
@@ -2539,6 +3317,7 @@ fn save_store_mapping(
     mapped_id: String,
     mapped_title: String,
 ) -> Result<GameRecord, String> {
+    let _io = io_lock();
     let mut games = load_games_from_disk(&app)?;
     let index = games
         .iter()
@@ -2575,6 +3354,7 @@ fn unlink_store_mapping(
     game_id: String,
     store_key: String,
 ) -> Result<GameRecord, String> {
+    let _io = io_lock();
     let mut games = load_games_from_disk(&app)?;
     let index = games
         .iter()
@@ -3393,9 +4173,15 @@ async fn fetch_steam_wishlist(
     None
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_all_notes(app: AppHandle) -> Result<Vec<NoteRecord>, String> {
-    let mut notes = load_notes_from_disk(&app)?;
+    let _io = io_lock();
+    // UI listing: a partial list beats a frozen screen. Write paths keep
+    // the strict loader so a skipped note is never deleted as an orphan.
+    let (mut notes, unreadable) = scan_notes_from_disk(&app)?;
+    if !unreadable.is_empty() {
+        let _ = app.emit("workspace-read-stalled", unreadable);
+    }
     notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(notes)
 }
@@ -3404,16 +4190,18 @@ fn get_all_notes(app: AppHandle) -> Result<Vec<NoteRecord>, String> {
 /// team-mode 3-way merge to compare the current on-disk version against
 /// the base the editor started from. Returns None when the file is
 /// absent or unparseable.
-#[tauri::command]
+#[tauri::command(async)]
 fn read_note(app: AppHandle, note_id: String) -> Result<Option<NoteRecord>, String> {
+    let _io = io_lock();
     let path = notes_dir(&app)?.join(format!("{}.json", safe_id_filename(&note_id)));
     if !path.exists() { return Ok(None); }
-    let raw = match fs::read_to_string(&path) { Ok(r) => r, Err(_) => return Ok(None) };
+    let raw = match read_text_guarded(&path) { Ok(r) => r, Err(_) => return Ok(None) };
     Ok(serde_json::from_str::<NoteRecord>(&raw).ok())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_note(app: AppHandle, mut note: NoteRecord) -> Result<NoteRecord, String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let is_new = note.id.trim().is_empty();
@@ -3433,8 +4221,9 @@ fn save_note(app: AppHandle, mut note: NoteRecord) -> Result<NoteRecord, String>
     Ok(note)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_note(app: AppHandle, note_id: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let mut notes = load_notes_from_disk(&app)?;
@@ -3442,6 +4231,7 @@ fn delete_note(app: AppHandle, note_id: String) -> Result<(), String> {
     notes.retain(|n| n.id != note_id);
     save_notes_to_disk(&app, &notes)?;
     append_activity(&app, "note.deleted", removed_title);
+    notify_windows(&app, "notes", Vec::new());
     Ok(())
 }
 
@@ -3466,7 +4256,7 @@ fn load_flows_from_disk(app: &AppHandle) -> Result<Vec<Flow>, String> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
-        let raw = match fs::read_to_string(&path) {
+        let raw = match read_text_guarded(&path) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -3503,13 +4293,15 @@ fn load_flows_from_disk(app: &AppHandle) -> Result<Vec<Flow>, String> {
     Ok(flows)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_flows(app: AppHandle) -> Result<Vec<Flow>, String> {
+    let _io = io_lock();
     load_flows_from_disk(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_flow(app: AppHandle, mut flow: Flow) -> Result<Flow, String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let is_new = flow.id.trim().is_empty();
@@ -3524,11 +4316,13 @@ fn save_flow(app: AppHandle, mut flow: Flow) -> Result<Flow, String> {
     if is_new {
         append_activity(&app, "flow.created", Some(flow.name.clone()));
     }
+    notify_windows(&app, "flows", Vec::new());
     Ok(flow)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_flow(app: AppHandle, flow_id: String) -> Result<(), String> {
+    let _io = io_lock();
     let _guard = WORKSPACE_WRITE_LOCK.lock()
         .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
     let dir = flows_dir(&app)?;
@@ -3538,6 +4332,7 @@ fn delete_flow(app: AppHandle, flow_id: String) -> Result<(), String> {
         if p.exists() { let _ = fs::remove_file(&p); }
     }
     append_activity(&app, "flow.deleted", None);
+    notify_windows(&app, "flows", Vec::new());
     Ok(())
 }
 
@@ -4359,6 +5154,9 @@ struct PressKitInput {
     /// `indie` which are dark out of the box.
     #[serde(default)]
     dark_mode: bool,
+    /// Settings → Studio logo; shown next to the developer name.
+    #[serde(default)]
+    studio_logo_path: String,
 }
 
 #[tauri::command]
@@ -4369,10 +5167,19 @@ fn generate_press_kit(
     input: Option<PressKitInput>,
 ) -> Result<String, String> {
     let games = load_games_from_disk(&app)?;
-    let game = games
+    let mut game = games
         .into_iter()
         .find(|g| g.id == game_id)
         .ok_or_else(|| "Oyun bulunamadi.".to_string())?;
+
+    // Image paths written by a teammate point into THEIR sync folder;
+    // re-anchor them onto this machine's workspace before rendering.
+    if let Some(cover) = game.cover_data_url.clone().filter(|c| !c.is_empty() && !c.starts_with("data:")) {
+        game.cover_data_url = Some(resolve_workspace_asset(&app, &cover).to_string_lossy().into_owned());
+    }
+    for item in game.moodboard.items.iter_mut() {
+        item.path = resolve_workspace_asset(&app, &item.path).to_string_lossy().into_owned();
+    }
 
     let out = PathBuf::from(&output_dir);
     if !out.exists() || !out.is_dir() {
@@ -4432,7 +5239,7 @@ fn render_press_kit(
                 }
             }
         } else {
-            // Treat as filesystem path.
+            // Treat as filesystem path (re-anchored if a teammate wrote it).
             let src = PathBuf::from(cover);
             if src.exists() {
                 let ext = src
@@ -4490,6 +5297,19 @@ fn render_press_kit(
         }
     }
 
+    // Studio logo (Settings → Studio) next to the developer name.
+    let mut studio_logo_filename: Option<String> = None;
+    if !input.studio_logo_path.is_empty() {
+        let src = PathBuf::from(&input.studio_logo_path);
+        if src.is_file() {
+            let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("png").to_lowercase();
+            let fname = format!("studio-logo.{ext}");
+            if fs::copy(&src, images_dir.join(&fname)).is_ok() {
+                studio_logo_filename = Some(fname);
+            }
+        }
+    }
+
     // Factsheet rows
     let developer = if input.developer.is_empty() { "HeraVex".to_string() } else { input.developer.clone() };
     let release_date = if input.release_date.is_empty() {
@@ -4499,7 +5319,14 @@ fn render_press_kit(
     };
 
     let mut factsheet_rows: Vec<(String, String)> = Vec::new();
-    factsheet_rows.push(("Developer".into(), html_escape(&developer)));
+    let developer_html = match studio_logo_filename.as_ref() {
+        Some(f) => format!(
+            r#"<span style="display:inline-flex;align-items:center;gap:8px"><img src="assets/images/{f}" alt="" style="width:28px;height:28px;border-radius:6px;object-fit:contain"/>{}</span>"#,
+            html_escape(&developer)
+        ),
+        None => html_escape(&developer),
+    };
+    factsheet_rows.push(("Developer".into(), developer_html));
     factsheet_rows.push(("Release".into(), html_escape(&release_date)));
     if !game.platforms.is_empty() {
         factsheet_rows.push(("Platforms".into(), html_escape(&game.platforms.join(" · "))));
@@ -5294,7 +6121,7 @@ fn html_escape(input: &str) -> String {
         .replace('"', "&quot;")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_workspace_path(app: AppHandle) -> Result<Option<String>, String> {
     Ok(load_settings_from_disk(&app)?.workspace_path)
 }
@@ -5440,6 +6267,405 @@ fn compute_storage_stats(app: AppHandle) -> Result<StorageStats, String> {
     })
 }
 
+// ── Storage maintenance (v0.9.9, Settings → Storage) ────────────────────────
+//
+// Every tool here only touches files HeraVex itself creates, inside the
+// active data root, and leaves anything that may still be in flight:
+//   * temp files younger than 10 minutes (an atomic write or backup of
+//     this or another instance may own them);
+//   * images changed in the last 24 hours (in a team folder the cloud
+//     client can deliver an image before the game file that uses it).
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CleanResult {
+    files: u64,
+    bytes: u64,
+}
+
+fn file_age_secs(md: &fs::Metadata) -> u64 {
+    md.modified()
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Leftovers of `atomic_write` (`name.<pid>.<n>.tmp`, old `name.tmp`)
+/// and of an interrupted backup (`*.zip.part`).
+fn is_temp_leftover(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".tmp") || lower.ends_with(".zip.part")
+}
+
+fn walk_files(dir: &Path, depth: u32, out: &mut Vec<(PathBuf, fs::Metadata)>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Ok(md) = entry.metadata() else { continue };
+        if md.is_dir() {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(name, "plugins" | "node_modules" | "target") {
+                continue;
+            }
+            walk_files(&p, depth + 1, out);
+        } else if md.is_file() {
+            out.push((p, md));
+        }
+    }
+}
+
+/// Clear the store-data cache (`<data root>/cache/`). Store Center
+/// downloads fresh numbers on its next refresh; the cache only exists
+/// as an offline fallback.
+#[tauri::command(async)]
+fn storage_clear_cache(app: AppHandle) -> Result<CleanResult, String> {
+    let _io = io_lock();
+    let dir = data_root(&app)?.join("cache");
+    let mut res = CleanResult::default();
+    let mut files = Vec::new();
+    walk_files(&dir, 0, &mut files);
+    for (p, md) in files {
+        if fs::remove_file(&p).is_ok() {
+            res.files += 1;
+            res.bytes += md.len();
+        }
+    }
+    Ok(res)
+}
+
+fn remove_temp_in(dir: &Path, min_age_secs: u64, res: &mut CleanResult) {
+    let mut files = Vec::new();
+    walk_files(dir, 0, &mut files);
+    for (p, md) in files {
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if is_temp_leftover(name) && file_age_secs(&md) >= min_age_secs && fs::remove_file(&p).is_ok() {
+            res.files += 1;
+            res.bytes += md.len();
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn storage_remove_temp(app: AppHandle) -> Result<CleanResult, String> {
+    let _io = io_lock();
+    let data = data_root(&app)?;
+    let local = root_dir(&app)?;
+    let mut res = CleanResult::default();
+    remove_temp_in(&data, 600, &mut res);
+    if local != data {
+        remove_temp_in(&local, 600, &mut res);
+    }
+    Ok(res)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrphanImage {
+    path: String,
+    /// `library/...` relative path, for display.
+    relative: String,
+    size_bytes: u64,
+}
+
+const IMAGE_EXTS: [&str; 6] = [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"];
+
+/// Every JSON record in the workspace, as text. An image is "used" when
+/// its file name appears anywhere in it (cover, moodboard, notes,
+/// flows...). Image names carry a millisecond timestamp, so a name match
+/// is specific; matching text instead of known fields means a field we
+/// forgot can never get an image deleted.
+fn workspace_json_text(root: &Path) -> Result<String, String> {
+    let mut text = String::new();
+    let mut files = Vec::new();
+    walk_files(root, 0, &mut files);
+    for (p, _) in files {
+        let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+        if !rel.to_lowercase().ends_with(".json") || rel.starts_with("Saves/") || rel.starts_with("backups/") {
+            continue;
+        }
+        match read_text_guarded(&p) {
+            Ok(t) => {
+                text.push_str(&t);
+                text.push('\n');
+            }
+            // Can't see what this file references, so refuse to call
+            // anything an orphan.
+            Err(ReadFail::TimedOut) => return Err(format!("{} okunamadi (zaman asimi)", rel)),
+            Err(ReadFail::Io(e)) => return Err(format!("{rel}: {e}")),
+        }
+    }
+    Ok(text.to_lowercase())
+}
+
+fn find_orphans_at(root: &Path, min_age_secs: u64) -> Result<Vec<OrphanImage>, String> {
+    let used = workspace_json_text(root)?;
+    let library = root.join("library");
+    let mut files = Vec::new();
+    walk_files(&library, 0, &mut files);
+    let mut out = Vec::new();
+    for (p, md) in files {
+        let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+        let lower = rel.to_lowercase();
+        // Only images HeraVex stores (covers / moodboard), never builds.
+        if !lower.contains("/assets/") || !IMAGE_EXTS.iter().any(|e| lower.ends_with(e)) {
+            continue;
+        }
+        if file_age_secs(&md) < min_age_secs {
+            continue;
+        }
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        if name.is_empty() || used.contains(&name) {
+            continue;
+        }
+        out.push(OrphanImage { path: p.to_string_lossy().to_string(), relative: rel, size_bytes: md.len() });
+    }
+    out.sort_by(|a, b| a.relative.cmp(&b.relative));
+    Ok(out)
+}
+
+#[tauri::command(async)]
+fn storage_find_orphan_images(app: AppHandle) -> Result<Vec<OrphanImage>, String> {
+    let _io = io_lock();
+    find_orphans_at(&data_root(&app)?, 24 * 3600)
+}
+
+/// Deletes only paths that are STILL orphans when re-checked now, so a
+/// list that went stale (teammate started using an image) is safe.
+#[tauri::command(async)]
+fn storage_delete_orphan_images(app: AppHandle, paths: Vec<String>) -> Result<CleanResult, String> {
+    let _io = io_lock();
+    let current = find_orphans_at(&data_root(&app)?, 24 * 3600)?;
+    let mut res = CleanResult::default();
+    for o in current.iter().filter(|o| paths.contains(&o.path)) {
+        if fs::remove_file(&o.path).is_ok() {
+            res.files += 1;
+            res.bytes += o.size_bytes;
+        }
+    }
+    Ok(res)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntegrityProblem {
+    /// "unreadable" | "corrupt" | "missingCover" | "missingImage" |
+    /// "missingBuild" | "duplicateId" | "tempLeftover"
+    kind: String,
+    file: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IntegrityReport {
+    checked_files: u64,
+    problems: Vec<IntegrityProblem>,
+}
+
+fn integrity_check_at(app: Option<&AppHandle>, root: &Path) -> IntegrityReport {
+    let mut problems = Vec::new();
+    let mut checked = 0u64;
+    let mut push = |kind: &str, file: &str, detail: String| {
+        problems.push(IntegrityProblem { kind: kind.into(), file: file.into(), detail });
+    };
+    let read = |p: &Path| -> Result<String, String> {
+        match read_text_guarded(p) {
+            Ok(t) => Ok(t),
+            Err(ReadFail::TimedOut) => Err("zaman asimi".into()),
+            Err(ReadFail::Io(e)) => Err(e),
+        }
+    };
+    let resolve = |raw: &str| -> PathBuf {
+        match app {
+            Some(a) => resolve_workspace_asset(a, raw),
+            None => PathBuf::from(raw),
+        }
+    };
+
+    // Games
+    let mut seen_ids: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut entries: Vec<PathBuf> = fs::read_dir(root.join("games"))
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    entries.sort();
+    for p in entries {
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let rel = format!("games/{name}");
+        checked += 1;
+        let raw = match read(&p) {
+            Ok(r) => r,
+            Err(e) => { push("unreadable", &rel, e); continue; }
+        };
+        let game: GameRecord = match serde_json::from_str(&raw) {
+            Ok(g) => g,
+            Err(e) => { push("corrupt", &rel, e.to_string()); continue; }
+        };
+        if let Some(prev) = seen_ids.insert(game.id.clone(), rel.clone()) {
+            push("duplicateId", &rel, format!("{} = {prev}", game.id));
+        }
+        if let Some(cover) = game.cover_data_url.as_ref().filter(|c| !c.is_empty() && !c.starts_with("data:")) {
+            if !resolve(cover).exists() {
+                push("missingCover", &rel, format!("{}: {cover}", game.title));
+            }
+        }
+        for item in &game.moodboard.items {
+            if !item.path.is_empty() && !item.path.starts_with("data:") && !resolve(&item.path).exists() {
+                push("missingImage", &rel, format!("{}: {}", game.title, item.path));
+            }
+        }
+        for v in &game.versions {
+            if let Some(b) = v.build_relative_path.as_ref() {
+                if !root.join("library").join(b).exists() {
+                    push("missingBuild", &rel, format!("{} {}: {b}", game.title, v.version));
+                }
+            }
+        }
+    }
+
+    // Notes, flows, wallet, settings: must parse.
+    let mut json_files: Vec<(String, PathBuf)> = Vec::new();
+    for sub in ["notes", "flows"] {
+        if let Ok(rd) = fs::read_dir(root.join(sub)) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().to_string();
+                if n.ends_with(".json") {
+                    json_files.push((format!("{sub}/{n}"), e.path()));
+                }
+            }
+        }
+    }
+    for name in ["wallet.json", "settings.json", "notes.json", "games.json"] {
+        let p = root.join(name);
+        if p.is_file() {
+            json_files.push((name.to_string(), p));
+        }
+    }
+    json_files.sort();
+    for (rel, p) in json_files {
+        checked += 1;
+        match read(&p) {
+            Ok(raw) if raw.trim().is_empty() => {}
+            Ok(raw) => {
+                let ok = if rel == "wallet.json" {
+                    serde_json::from_str::<WalletFile>(&raw).map(|_| ()).map_err(|e| e.to_string())
+                } else if rel.starts_with("notes/") {
+                    serde_json::from_str::<NoteRecord>(&raw).map(|_| ()).map_err(|e| e.to_string())
+                } else {
+                    serde_json::from_str::<serde_json::Value>(&raw).map(|_| ()).map_err(|e| e.to_string())
+                };
+                if let Err(e) = ok {
+                    push("corrupt", &rel, e);
+                }
+            }
+            Err(e) => push("unreadable", &rel, e),
+        }
+    }
+
+    // Leftover temp files (informational; "Remove temporary files" fixes).
+    let mut files = Vec::new();
+    walk_files(root, 0, &mut files);
+    let temps = files
+        .iter()
+        .filter(|(p, _)| is_temp_leftover(p.file_name().and_then(|s| s.to_str()).unwrap_or("")))
+        .count();
+    if temps > 0 {
+        push("tempLeftover", "", temps.to_string());
+    }
+
+    IntegrityReport { checked_files: checked, problems }
+}
+
+#[tauri::command(async)]
+fn storage_integrity_check(app: AppHandle) -> Result<IntegrityReport, String> {
+    let _io = io_lock();
+    let root = data_root(&app)?;
+    Ok(integrity_check_at(Some(&app), &root))
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PruneResult {
+    games: u64,
+    files: u64,
+    bytes: u64,
+}
+
+/// Versions whose build file should go: everything with a build beyond
+/// the newest `keep` builds, never the game's current build. Versions
+/// are stored newest first.
+fn builds_to_prune(game: &GameRecord, keep: usize) -> Vec<usize> {
+    let current = game.current_build_relative_path.as_deref();
+    let mut seen = 0usize;
+    let mut out = Vec::new();
+    for (i, v) in game.versions.iter().enumerate() {
+        let Some(path) = v.build_relative_path.as_deref() else { continue };
+        seen += 1;
+        if seen > keep && Some(path) != current {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// Delete old build files of one game. The version entries (number,
+/// notes, date) stay; only the file goes and the entry is marked.
+fn prune_game_builds(library: &Path, game: &mut GameRecord, keep: usize, res: &mut PruneResult) -> bool {
+    let idx = builds_to_prune(game, keep);
+    if idx.is_empty() {
+        return false;
+    }
+    let versions_root = library.join(game_folder_name(game)).join("versions");
+    for i in idx {
+        let Some(rel) = game.versions[i].build_relative_path.clone() else { continue };
+        let file = library.join(&rel);
+        // The build lives in its own `versions/<slug>-<id>/` folder.
+        if let Some(dir) = file.parent().filter(|d| d.parent() == Some(versions_root.as_path())) {
+            let (bytes, files) = dir_size_recursive(&dir.to_path_buf());
+            if !dir.exists() || fs::remove_dir_all(dir).is_ok() {
+                res.files += files;
+                res.bytes += bytes;
+            } else {
+                continue;
+            }
+        } else if file.is_file() {
+            let len = fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+            if fs::remove_file(&file).is_err() {
+                continue;
+            }
+            res.files += 1;
+            res.bytes += len;
+        }
+        game.versions[i].build_relative_path = None;
+        game.versions[i].build_pruned_at = Some(now_iso());
+    }
+    res.games += 1;
+    true
+}
+
+#[tauri::command(async)]
+fn storage_prune_builds(app: AppHandle, keep: u32) -> Result<PruneResult, String> {
+    let _io = io_lock();
+    let _guard = WORKSPACE_WRITE_LOCK.lock()
+        .map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let keep = keep.max(1) as usize;
+    let library = library_dir(&app)?;
+    let mut res = PruneResult::default();
+    for mut game in load_games_from_disk(&app)? {
+        if prune_game_builds(&library, &mut game, keep, &mut res) {
+            game.updated_at = now_iso();
+            save_single_game_to_disk(&app, &game)?;
+        }
+    }
+    Ok(res)
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupEntry {
@@ -5459,8 +6685,7 @@ fn list_backups(app: AppHandle) -> Result<Vec<BackupEntry>, String> {
     // Canonical folder is `Saves/`. Legacy `backups/` is still scanned
     // so users upgrading from older v0.9 builds don't lose visibility
     // on their existing dumps. Both folders are de-duped by full path.
-    let root = data_root(&app)?;
-    let candidates = [root.join("Saves"), root.join("backups")];
+    let candidates = backup_dirs(&app)?;
     let mut out: Vec<BackupEntry> = Vec::new();
     for folder in &candidates {
         let Ok(entries) = fs::read_dir(folder) else { continue; };
@@ -5498,6 +6723,751 @@ fn list_backups(app: AppHandle) -> Result<Vec<BackupEntry>, String> {
     Ok(out)
 }
 
+// ── Backup housekeeping (v0.9.9, Settings → Backup) ─────────────────────────
+//
+// Runs right after each backup:
+//   * mirror   — copy the new archive to a folder the user picked (e.g.
+//                inside Dropbox / Drive), written as .part then renamed;
+//   * retention— keep the newest N AUTOMATIC backups (manual ones are
+//                never deleted for you), here and in the mirror folder;
+//   * compress — re-pack older archives at maximum compression. Each
+//                re-packed archive is verified before it replaces the
+//                original, keeps its date, and is marked in the zip
+//                comment so it is never re-packed twice.
+
+const COMPRESSED_MARK: &str = "heravex:compressed";
+
+/// Every folder backups can live in. Backups are written to the
+/// app-local `Saves/`; older builds used the data root (`Saves/`,
+/// `backups/`). With a custom workspace those differ, so all are listed.
+fn backup_dirs(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in [root_dir(app)?.join("Saves"), data_root(app)?.join("Saves"), data_root(app)?.join("backups")] {
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BackupHousekeeping {
+    #[serde(default)]
+    retention: Option<u32>,
+    #[serde(default)]
+    compress_old: Option<bool>,
+    #[serde(default)]
+    mirror_dir: Option<String>,
+}
+
+fn is_backup_archive(name: &str) -> bool {
+    (name.starts_with("auto-") || name.starts_with("manual-")) && name.ends_with(".zip")
+}
+
+/// Our backup archives in `dir`, newest first (names carry the stamp).
+fn backup_archives(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name().and_then(|n| n.to_str()).map_or(false, is_backup_archive))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by(|a, b| {
+        let stamp = |p: &PathBuf| {
+            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            n.split_once('-').map(|(_, rest)| rest.to_string()).unwrap_or(n)
+        };
+        stamp(b).cmp(&stamp(a))
+    });
+    v
+}
+
+/// Delete automatic backups beyond the newest `keep`.
+fn apply_retention(dir: &Path, keep: usize) -> u64 {
+    let mut removed = 0;
+    let autos: Vec<PathBuf> = backup_archives(dir)
+        .into_iter()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with("auto-")))
+        .collect();
+    for p in autos.into_iter().skip(keep) {
+        if fs::remove_file(&p).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn copy_to_mirror(src: &Path, mirror: &Path) -> Result<PathBuf, String> {
+    if !mirror.is_dir() {
+        return Err(format!("Yedek kopya klasoru bulunamadi: {}", mirror.display()));
+    }
+    let name = src.file_name().ok_or("dosya adi yok")?;
+    let target = mirror.join(name);
+    let part = mirror.join(format!("{}.part", name.to_string_lossy()));
+    fs::copy(src, &part).map_err(|e| format!("Yedek kopyalanamadi: {e}"))?;
+    fs::rename(&part, &target).map_err(|e| {
+        let _ = fs::remove_file(&part);
+        format!("Yedek kopyalanamadi: {e}")
+    })?;
+    Ok(target)
+}
+
+fn zip_is_marked_compressed(path: &Path) -> bool {
+    fs::File::open(path)
+        .ok()
+        .and_then(|f| zip::ZipArchive::new(f).ok())
+        .map_or(false, |a| a.comment() == COMPRESSED_MARK.as_bytes())
+}
+
+/// Re-pack one archive at maximum compression. Returns bytes saved.
+fn recompress_backup(path: &Path) -> Result<u64, String> {
+    use std::io::{Read, Write};
+    use zip::{write::SimpleFileOptions, ZipWriter};
+    let before = fs::metadata(path).map_err(|e| e.to_string())?;
+    let mut src = zip::ZipArchive::new(fs::File::open(path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let part = path.with_extension("zip.part");
+    {
+        let mut out = ZipWriter::new(fs::File::create(&part).map_err(|e| e.to_string())?);
+        let opts = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(9));
+        let mut buf = Vec::new();
+        for i in 0..src.len() {
+            let mut entry = src.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().to_string();
+            if entry.is_dir() {
+                continue;
+            }
+            buf.clear();
+            entry.read_to_end(&mut buf).map_err(|e| format!("{name}: {e}"))?;
+            out.start_file(&name, opts).map_err(|e| e.to_string())?;
+            out.write_all(&buf).map_err(|e| e.to_string())?;
+        }
+        out.set_comment(COMPRESSED_MARK);
+        out.finish().map_err(|e| e.to_string())?;
+    }
+    // Only replace the original once the new archive checks out.
+    let report = verify_backup_at(&part);
+    if !report.ok {
+        let _ = fs::remove_file(&part);
+        return Err(format!("yeniden paketleme dogrulanamadi: {}", report.problems.join("; ")));
+    }
+    let after = fs::metadata(&part).map_err(|e| e.to_string())?.len();
+    if after >= before.len() {
+        // No gain: keep the original, just remember it was tried.
+        let _ = fs::remove_file(&part);
+        return Ok(0);
+    }
+    fs::rename(&part, path).map_err(|e| e.to_string())?;
+    // Keep the backup's date so history and retention stay in order.
+    if let (Ok(mtime), Ok(f)) = (before.modified(), fs::OpenOptions::new().write(true).open(path)) {
+        let _ = f.set_modified(mtime);
+    }
+    Ok(before.len() - after)
+}
+
+/// Re-pack every archive except the newest `skip_newest`.
+fn compress_old_backups(dir: &Path, skip_newest: usize) -> u64 {
+    let mut saved = 0;
+    for p in backup_archives(dir).into_iter().skip(skip_newest) {
+        if zip_is_marked_compressed(&p) {
+            continue;
+        }
+        match recompress_backup(&p) {
+            Ok(s) => saved += s,
+            Err(e) => eprintln!("[backup] compress {}: {e}", p.display()),
+        }
+    }
+    saved
+}
+
+fn run_backup_housekeeping(app: &AppHandle, new_backup: &Path, hk: &BackupHousekeeping) {
+    let saves = new_backup.parent().map(Path::to_path_buf);
+    if let Some(dir) = hk.mirror_dir.as_ref().filter(|d| !d.trim().is_empty()) {
+        let mirror = PathBuf::from(dir);
+        match copy_to_mirror(new_backup, &mirror) {
+            Ok(_) => {
+                if let Some(keep) = hk.retention {
+                    apply_retention(&mirror, keep.max(1) as usize);
+                }
+            }
+            Err(e) => {
+                let _ = app.emit("backup-mirror-failed", e);
+            }
+        }
+    }
+    if let (Some(keep), Some(dir)) = (hk.retention, saves.as_ref()) {
+        apply_retention(dir, keep.max(1) as usize);
+    }
+    if hk.compress_old == Some(true) {
+        if let Some(dir) = saves.as_ref() {
+            compress_old_backups(dir, 3);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct BackupVerifyReport {
+    ok: bool,
+    format_version: u64,
+    games: usize,
+    notes: usize,
+    files: usize,
+    has_wallet: bool,
+    problems: Vec<String>,
+}
+
+/// Open a backup and read every byte of it: the zip checks each entry's
+/// CRC while reading, the manifest must parse into the real record types,
+/// and library paths must be safe to restore.
+fn verify_backup_at(path: &Path) -> BackupVerifyReport {
+    use std::io::Read;
+    let mut r = BackupVerifyReport::default();
+    let is_zip = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or(false, |e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("part"));
+    if !is_zip {
+        match fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|raw| {
+            serde_json::from_str::<BackupSnapshot>(&raw).map_err(|e| e.to_string())
+        }) {
+            Ok(snap) => {
+                r.format_version = snap.version as u64;
+                r.games = snap.games.len();
+                r.notes = snap.notes.len();
+                r.files = snap.files.len();
+                r.has_wallet = snap.wallet.is_some() || !snap.settings.global_expenses.is_empty();
+                for f in &snap.files {
+                    if validate_relative_backup_path(&f.path).is_err() {
+                        r.problems.push(format!("guvensiz yol: {}", f.path));
+                    }
+                }
+            }
+            Err(e) => r.problems.push(format!("okunamadi: {e}")),
+        }
+        r.ok = r.problems.is_empty();
+        return r;
+    }
+    let mut archive = match fs::File::open(path).map_err(|e| e.to_string()).and_then(|f| {
+        zip::ZipArchive::new(f).map_err(|e| e.to_string())
+    }) {
+        Ok(a) => a,
+        Err(e) => {
+            r.problems.push(format!("zip acilamadi: {e}"));
+            return r;
+        }
+    };
+    let mut manifest_seen = false;
+    let mut sink = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => { r.problems.push(format!("kayit {i}: {e}")); continue; }
+        };
+        let name = entry.name().to_string();
+        sink.clear();
+        if let Err(e) = entry.read_to_end(&mut sink) {
+            r.problems.push(format!("{name}: {e}"));
+            continue;
+        }
+        if name == "manifest.json" {
+            manifest_seen = true;
+            let v: serde_json::Value = match serde_json::from_slice(&sink) {
+                Ok(v) => v,
+                Err(e) => { r.problems.push(format!("manifest.json: {e}")); continue; }
+            };
+            r.format_version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);
+            if r.format_version != 2 {
+                r.problems.push(format!("desteklenmeyen surum: {}", r.format_version));
+            }
+            match v.get("games").map(|g| serde_json::from_value::<Vec<GameRecord>>(g.clone())) {
+                Some(Ok(g)) => r.games = g.len(),
+                Some(Err(e)) => r.problems.push(format!("oyunlar: {e}")),
+                None => r.problems.push("oyun listesi yok".into()),
+            }
+            if let Some(n) = v.get("notes") {
+                match serde_json::from_value::<Vec<NoteRecord>>(n.clone()) {
+                    Ok(n) => r.notes = n.len(),
+                    Err(e) => r.problems.push(format!("notlar: {e}")),
+                }
+            }
+            if let Some(s) = v.get("settings") {
+                match serde_json::from_value::<AppSettings>(s.clone()) {
+                    Ok(s) => r.has_wallet |= !s.global_expenses.is_empty(),
+                    Err(e) => r.problems.push(format!("ayarlar: {e}")),
+                }
+            }
+            if let Some(w) = v.get("wallet").filter(|w| !w.is_null()) {
+                match serde_json::from_value::<WalletFile>(w.clone()) {
+                    Ok(_) => r.has_wallet = true,
+                    Err(e) => r.problems.push(format!("cuzdan: {e}")),
+                }
+            }
+        } else if let Some(rel) = name.strip_prefix("library/") {
+            if !rel.is_empty() && !name.ends_with('/') {
+                r.files += 1;
+                if validate_relative_backup_path(rel).is_err() {
+                    r.problems.push(format!("guvensiz yol: {name}"));
+                }
+            }
+        }
+    }
+    if !manifest_seen {
+        r.problems.push("manifest.json yok".into());
+    }
+    r.ok = r.problems.is_empty();
+    r
+}
+
+#[tauri::command(async)]
+fn verify_backup(app: AppHandle, path: String) -> Result<BackupVerifyReport, String> {
+    let target = PathBuf::from(&path);
+    let canon = target.canonicalize().map_err(|e| e.to_string())?;
+    let allowed = backup_dirs(&app)?
+        .into_iter()
+        .filter_map(|d| d.canonicalize().ok())
+        .any(|d| canon.starts_with(&d));
+    if !allowed {
+        return Err("Path is outside the backup directory.".to_string());
+    }
+    Ok(verify_backup_at(&canon))
+}
+
+// ── Import / export (v0.9.9, Settings → Import & Export) ────────────────────
+//
+// Format conversion (CSV, Markdown, Obsidian, Notion, Trello) lives in
+// `src/lib/importExport.ts` where it is unit-tested; Rust only picks,
+// reads and writes files. The one exception is the single-game bundle,
+// which has to copy image files between workspaces.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextFileOut {
+    name: String,
+    contents: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextFileIn {
+    /// Path relative to the picked folder / archive, `/`-separated.
+    relative: String,
+    contents: String,
+    modified_at: String,
+}
+
+const IMPORT_MAX_FILES: usize = 5000;
+const IMPORT_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// A file name that can't escape the target folder or upset Windows.
+fn safe_file_name(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '-' } else { c })
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    let mut name: String = trimmed.chars().take(120).collect();
+    if name.is_empty() {
+        name = "untitled".into();
+    }
+    let stem = name.split('.').next().unwrap_or("").to_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "LPT1" | "LPT2") {
+        name = format!("_{name}");
+    }
+    name
+}
+
+fn mtime_iso(md: &fs::Metadata) -> String {
+    md.modified()
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+        .unwrap_or_else(now_iso)
+}
+
+/// Save one text file through a save dialog. Returns the chosen path.
+#[tauri::command(async)]
+fn save_text_file_dialog(
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+    contents: String,
+) -> Result<String, String> {
+    let exts: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let path = FileDialog::new()
+        .set_file_name(&safe_file_name(&default_name))
+        .add_filter(&filter_name, &exts)
+        .save_file()
+        .ok_or_else(|| "Kaydetme iptal edildi.".to_string())?;
+    atomic_write(&path, contents.as_bytes())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Write many text files into a NEW subfolder of `dir` (never into an
+/// existing one, so nothing of the user's is overwritten). Returns the
+/// folder created.
+#[tauri::command(async)]
+fn write_text_files_to_new_folder(dir: String, folder_name: String, files: Vec<TextFileOut>) -> Result<String, String> {
+    let parent = PathBuf::from(&dir);
+    if !parent.is_dir() {
+        return Err(format!("Klasor bulunamadi: {dir}"));
+    }
+    let base = safe_file_name(&folder_name);
+    let mut target = parent.join(&base);
+    let mut n = 2;
+    while target.exists() {
+        target = parent.join(format!("{base} ({n})"));
+        n += 1;
+    }
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in files {
+        let name = safe_file_name(&f.name);
+        let (stem, ext) = match name.rfind('.') {
+            Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
+            _ => (name.clone(), String::new()),
+        };
+        let mut candidate = name.clone();
+        let mut k = 2;
+        while !used.insert(candidate.to_lowercase()) {
+            candidate = format!("{stem} ({k}){ext}");
+            k += 1;
+        }
+        fs::write(target.join(&candidate), f.contents.as_bytes()).map_err(|e| format!("{candidate}: {e}"))?;
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
+fn read_text_files_from_dir(root: &Path, exts: &[String]) -> Result<Vec<TextFileIn>, String> {
+    let mut out = Vec::new();
+    fn visit(root: &Path, dir: &Path, exts: &[String], depth: u32, out: &mut Vec<TextFileIn>) -> Result<(), String> {
+        if depth > 12 || out.len() >= IMPORT_MAX_FILES {
+            return Ok(());
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return Ok(()) };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            let Ok(md) = e.metadata() else { continue };
+            if md.is_dir() {
+                // Obsidian config / trash and other hidden folders.
+                if name.starts_with('.') || name == "node_modules" {
+                    continue;
+                }
+                visit(root, &p, exts, depth + 1, out)?;
+            } else if md.is_file() {
+                let lower = name.to_lowercase();
+                if !exts.iter().any(|x| lower.ends_with(&format!(".{}", x.to_lowercase()))) {
+                    continue;
+                }
+                if md.len() > IMPORT_MAX_BYTES {
+                    continue;
+                }
+                let contents = fs::read_to_string(&p).map_err(|err| format!("{name}: {err}"))?;
+                let relative = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                out.push(TextFileIn { relative, contents, modified_at: mtime_iso(&md) });
+                if out.len() >= IMPORT_MAX_FILES {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+    visit(root, root, exts, 0, &mut out)?;
+    Ok(out)
+}
+
+/// Text files inside a zip; zips inside it (Notion splits big exports
+/// into `Part-N.zip`) are opened one level deep.
+fn read_text_files_from_zip_reader<R: std::io::Read + std::io::Seek>(
+    reader: R,
+    exts: &[String],
+    depth: u32,
+    out: &mut Vec<TextFileIn>,
+) -> Result<(), String> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("zip: {e}"))?;
+    for i in 0..archive.len() {
+        if out.len() >= IMPORT_MAX_FILES {
+            break;
+        }
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().replace('\\', "/");
+        let lower = name.to_lowercase();
+        if lower.split('/').any(|seg| seg.starts_with('.') || seg == "__macosx") {
+            continue;
+        }
+        if lower.ends_with(".zip") && depth == 0 {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            read_text_files_from_zip_reader(std::io::Cursor::new(buf), exts, depth + 1, out)?;
+            continue;
+        }
+        if !exts.iter().any(|x| lower.ends_with(&format!(".{}", x.to_lowercase()))) || entry.size() > IMPORT_MAX_BYTES {
+            continue;
+        }
+        let mut contents = String::new();
+        if entry.read_to_string(&mut contents).is_err() {
+            continue; // not UTF-8 text
+        }
+        out.push(TextFileIn { relative: name, contents, modified_at: now_iso() });
+    }
+    Ok(())
+}
+
+/// Pick a folder (or, with `allow_zip`, a .zip) and read its text files
+/// with the given extensions. Returns (source path, files).
+#[tauri::command(async)]
+fn pick_and_read_text_files(
+    extensions: Vec<String>,
+    allow_zip: Option<bool>,
+    title: Option<String>,
+) -> Result<(String, Vec<TextFileIn>), String> {
+    let title = title.unwrap_or_else(|| "Klasor sec".into());
+    if allow_zip == Some(true) {
+        // A zip export (Notion) or an already-unzipped folder.
+        if let Some(file) = FileDialog::new().set_title(&title).add_filter("ZIP", &["zip"]).pick_file() {
+            let mut out = Vec::new();
+            let f = fs::File::open(&file).map_err(|e| e.to_string())?;
+            read_text_files_from_zip_reader(f, &extensions, 0, &mut out)?;
+            return Ok((file.to_string_lossy().to_string(), out));
+        }
+        return Err("Secim iptal edildi.".into());
+    }
+    let dir = FileDialog::new()
+        .set_title(&title)
+        .pick_folder()
+        .ok_or_else(|| "Secim iptal edildi.".to_string())?;
+    let files = read_text_files_from_dir(&dir, &extensions)?;
+    Ok((dir.to_string_lossy().to_string(), files))
+}
+
+/// Pick one text file (CSV, Trello JSON...).
+#[tauri::command(async)]
+fn pick_and_read_text_file(filter_name: String, extensions: Vec<String>) -> Result<TextFileIn, String> {
+    let exts: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let path = FileDialog::new()
+        .add_filter(&filter_name, &exts)
+        .pick_file()
+        .ok_or_else(|| "Secim iptal edildi.".to_string())?;
+    let md = fs::metadata(&path).map_err(|e| e.to_string())?;
+    if md.len() > 50 * 1024 * 1024 {
+        return Err("Dosya cok buyuk (50 MB ustu).".into());
+    }
+    let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+    // Excel saves CSV with a BOM; strip it.
+    let text = String::from_utf8_lossy(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes)).to_string();
+    Ok(TextFileIn {
+        relative: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        contents: text,
+        modified_at: mtime_iso(&md),
+    })
+}
+
+/// A game ready to leave the workspace: builds are not bundled (they can
+/// be gigabytes and belong to one machine's release flow), so their
+/// paths are cleared; version entries and notes stay.
+fn game_for_bundle(game: &GameRecord) -> GameRecord {
+    let mut g = game.clone();
+    g.current_build_relative_path = None;
+    for v in g.versions.iter_mut() {
+        v.build_relative_path = None;
+    }
+    g
+}
+
+/// Images to bundle: files under the game's `assets/` folder, as
+/// (path inside the bundle, source path).
+fn bundle_assets(game_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut files = Vec::new();
+    walk_files(&game_dir.join("assets"), 0, &mut files);
+    files
+        .into_iter()
+        .map(|(p, _)| {
+            let rel = p.strip_prefix(game_dir).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+            (rel, p)
+        })
+        .collect()
+}
+
+/// Settings → Import & Export → "Export a single game":
+/// `<title>.heravex-game.zip` with `game.json` + the game's images.
+#[tauri::command(async)]
+fn export_game_bundle(app: AppHandle, game_id: String) -> Result<String, String> {
+    use std::io::Write;
+    use zip::{write::SimpleFileOptions, ZipWriter};
+    let game = {
+        let _io = io_lock();
+        load_games_from_disk(&app)?
+            .into_iter()
+            .find(|g| g.id == game_id)
+            .ok_or_else(|| "Oyun bulunamadi.".to_string())?
+    };
+    let target = FileDialog::new()
+        .set_file_name(&format!("{}.heravex-game.zip", safe_file_name(&slugify(&game.title))))
+        .add_filter("HeraVex game", &["zip"])
+        .save_file()
+        .ok_or_else(|| "Kaydetme iptal edildi.".to_string())?;
+    let game_dir = game_folder(&app, &game)?;
+    let part = target.with_extension("zip.part");
+    {
+        let mut zip = ZipWriter::new(fs::File::create(&part).map_err(|e| e.to_string())?);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let payload = serde_json::json!({
+            "kind": "heravex-game",
+            "version": 1,
+            "exportedAt": now_iso(),
+            "game": game_for_bundle(&game),
+        });
+        zip.start_file("game.json", opts).map_err(|e| e.to_string())?;
+        zip.write_all(&serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        for (rel, src) in bundle_assets(&game_dir) {
+            let bytes = fs::read(&src).map_err(|e| format!("{rel}: {e}"))?;
+            zip.start_file(format!("files/{rel}"), opts).map_err(|e| e.to_string())?;
+            zip.write_all(&bytes).map_err(|e| e.to_string())?;
+        }
+        zip.finish().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&part, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Re-point image paths (absolute paths from the exporting machine) at
+/// the copies in the new game folder, matched by file name.
+fn remap_bundle_paths(game: &mut GameRecord, by_name: &std::collections::HashMap<String, PathBuf>) {
+    let remap = |raw: &str| -> Option<String> {
+        if raw.is_empty() || raw.starts_with("data:") {
+            return None;
+        }
+        let name = raw.replace('\\', "/").rsplit('/').next().unwrap_or("").to_lowercase();
+        by_name.get(&name).map(|p| p.to_string_lossy().to_string())
+    };
+    if let Some(cover) = game.cover_data_url.clone() {
+        if let Some(p) = remap(&cover) {
+            game.cover_data_url = Some(p);
+        }
+    }
+    for item in game.moodboard.items.iter_mut() {
+        if let Some(p) = remap(&item.path) {
+            item.path = p;
+        }
+    }
+}
+
+/// "HeraVex JSON" import: a `.heravex-game.zip` from "Export a single
+/// game" (or a bare game `.json`). The game gets a NEW id, so importing
+/// into the workspace it came from makes a copy instead of overwriting.
+#[tauri::command(async)]
+fn import_game_bundle(app: AppHandle) -> Result<GameRecord, String> {
+    use std::io::Read;
+    let path = FileDialog::new()
+        .add_filter("HeraVex game", &["zip", "json"])
+        .pick_file()
+        .ok_or_else(|| "Secim iptal edildi.".to_string())?;
+    let is_zip = path.extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case("zip"));
+    let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+    let raw_json: Vec<u8> = if is_zip {
+        let mut archive = zip::ZipArchive::new(fs::File::open(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("zip: {e}"))?;
+        let mut json = None;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let name = entry.name().replace('\\', "/");
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf).map_err(|e| format!("{name}: {e}"))?;
+            if name == "game.json" {
+                json = Some(buf);
+            } else if let Some(rel) = name.strip_prefix("files/") {
+                if !rel.is_empty() && !name.ends_with('/') {
+                    images.push((validate_relative_backup_path(rel)?.to_string_lossy().replace('\\', "/"), buf));
+                }
+            }
+        }
+        json.ok_or_else(|| "Bu dosya bir HeraVex oyun paketi degil (game.json yok).".to_string())?
+    } else {
+        fs::read(&path).map_err(|e| e.to_string())?
+    };
+    let value: serde_json::Value = serde_json::from_slice(&raw_json).map_err(|e| format!("game.json: {e}"))?;
+    let game_value = value.get("game").cloned().unwrap_or(value);
+    let mut game: GameRecord =
+        serde_json::from_value(game_value).map_err(|e| format!("Oyun okunamadi: {e}"))?;
+
+    let _io = io_lock();
+    let _guard = WORKSPACE_WRITE_LOCK.lock().map_err(|e| format!("write-lock zehirlendi: {e}"))?;
+    let existing = load_games_from_disk(&app)?;
+    let mut new_id = next_id();
+    while existing.iter().any(|g| g.id == new_id) {
+        new_id = next_id();
+    }
+    game.id = new_id;
+    if existing.iter().any(|g| g.title == game.title) {
+        game.title = format!("{} (2)", game.title);
+    }
+    game.updated_at = now_iso();
+    let game = game_for_bundle(&game);
+    let mut game = game;
+    let dir = game_folder(&app, &game)?;
+    fs::create_dir_all(dir.join("versions")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir.join("assets")).map_err(|e| e.to_string())?;
+    let mut by_name = std::collections::HashMap::new();
+    for (rel, bytes) in images {
+        let target = dir.join(&rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&target, bytes).map_err(|e| e.to_string())?;
+        let name = target.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        by_name.insert(name, target);
+    }
+    remap_bundle_paths(&mut game, &by_name);
+    save_single_game_to_disk(&app, &game)?;
+    append_activity(&app, "game.imported", Some(game.title.clone()));
+    Ok(game)
+}
+
+/// Settings → Webhooks → Custom. POSTs `body` as JSON. Only https (or
+/// http to this machine, for testing) so a typo can't send data in the
+/// clear across the internet. Returns the HTTP status.
+fn webhook_url_allowed(url: &str) -> bool {
+    let lower = url.trim().to_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://localhost")
+        || lower.starts_with("http://127.0.0.1")
+}
+
+#[tauri::command]
+async fn post_webhook(url: String, body: serde_json::Value) -> Result<u16, String> {
+    if !webhook_url_allowed(&url) {
+        return Err("Webhook adresi https:// ile baslamali.".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent(concat!("HeraVex/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(url.trim())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Webhook gonderilemedi: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("Webhook {} dondu", status.as_u16()));
+    }
+    Ok(status.as_u16())
+}
+
 /// Destructive nuclear option. Walks the data root and removes every
 /// subdirectory we created (games/, notes/, library/, backups/) plus
 /// the settings file. The frontend gates this behind a "type SIL to
@@ -5515,7 +7485,7 @@ fn delete_all_data(app: AppHandle) -> Result<(), String> {
         }
     }
     // settings.json + cached files
-    for name in ["settings.json", "games.legacy.json", "notes.legacy.json"] {
+    for name in ["settings.json", "wallet.json", "games.legacy.json", "notes.legacy.json"] {
         let p = root.join(name);
         if p.exists() {
             let _ = fs::remove_file(&p);
@@ -5556,13 +7526,10 @@ fn delete_backup(app: AppHandle, path: String) -> Result<(), String> {
     // live under one of our backup directories. Both `Saves/` (current)
     // and `backups/` (legacy) are accepted so users upgrading from older
     // builds can still prune their old files.
-    let root = data_root(&app)?;
-    let allowed = ["Saves", "backups"];
     let target = PathBuf::from(&path);
     let canonical_target = target.canonicalize().map_err(|e| e.to_string())?;
     let mut ok = false;
-    for folder in &allowed {
-        let dir = root.join(folder);
+    for dir in backup_dirs(&app)? {
         if let Ok(canon) = dir.canonicalize() {
             if canonical_target.starts_with(&canon) {
                 ok = true;
@@ -5773,6 +7740,25 @@ fn validate_plugin_manifest(
     Ok(())
 }
 
+/// Read a response body, failing as soon as it passes `limit` bytes —
+/// the old code downloaded everything first and only then checked the
+/// size, so a huge (or endless) response could exhaust memory.
+async fn read_body_capped(mut resp: reqwest::Response, limit: usize, what: &str) -> Result<Vec<u8>, String> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > limit {
+            return Err(format!("{what} cok buyuk ({} MB siniri).", limit / (1024 * 1024)));
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len() + chunk.len() > limit {
+            return Err(format!("{what} cok buyuk ({} MB siniri).", limit / (1024 * 1024)));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginFetchResult {
@@ -5798,10 +7784,7 @@ async fn plugin_fetch(app: AppHandle, source: String) -> Result<PluginFetchResul
         if !resp.status().is_success() {
             return Err(format!("Indirme basarisiz: HTTP {}", resp.status()));
         }
-        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        if bytes.len() > 50 * 1024 * 1024 {
-            return Err("Eklenti arsivi cok buyuk (50MB siniri).".into());
-        }
+        let bytes = read_body_capped(resp, 50 * 1024 * 1024, "Eklenti arsivi").await?;
         fs::write(&staged, &bytes).map_err(|e| e.to_string())?;
     } else {
         let from = PathBuf::from(&src);
@@ -5826,12 +7809,53 @@ async fn plugin_fetch(app: AppHandle, source: String) -> Result<PluginFetchResul
     Ok(PluginFetchResult { manifest, staged: staged.to_string_lossy().to_string() })
 }
 
-/// Extract a previously staged archive into plugins/<id>/ (consent given).
-#[tauri::command]
-fn plugin_install(app: AppHandle, staged: String) -> Result<serde_json::Value, String> {
+/// Unpacked size limit for one plugin (zip-bomb guard).
+const PLUGIN_MAX_UNPACKED: u64 = 200 * 1024 * 1024;
+
+/// Extract the plugin files (under `prefix`) into `dest`. Zip-slip safe:
+/// only paths that stay inside the archive root are written.
+fn extract_plugin_archive(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    prefix: &str,
+    dest: &Path,
+) -> Result<(), String> {
     use std::io::Read;
+    let mut total: u64 = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let Some(enclosed) = entry.enclosed_name() else { continue };
+        let rel = enclosed.to_string_lossy().replace('\\', "/");
+        let Some(stripped) = rel.strip_prefix(prefix) else { continue };
+        if stripped.is_empty() { continue; }
+        let out_path = dest.join(stripped);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut buf = Vec::new();
+        // `take` bounds what we read even if the header lies about the size.
+        (&mut entry).take(PLUGIN_MAX_UNPACKED - total + 1).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        total += buf.len() as u64;
+        if total > PLUGIN_MAX_UNPACKED {
+            return Err("Eklenti acildiginda cok buyuk (200 MB siniri).".into());
+        }
+        fs::write(&out_path, &buf).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Extract a previously staged archive into plugins/<id>/ (consent given).
+/// The new version is unpacked next to the old one first and only then
+/// swapped in, so a failed install never leaves the plugin missing.
+/// Async: unpacking a large plugin must not freeze the window.
+#[tauri::command(async)]
+fn plugin_install(app: AppHandle, staged: String) -> Result<serde_json::Value, String> {
     let staged_path = PathBuf::from(&staged);
-    let staging_dir = plugins_root(&app)?.join(".staging");
+    let root = plugins_root(&app)?;
+    let staging_dir = root.join(".staging");
     if !staged_path.starts_with(&staging_dir) || !staged_path.is_file() {
         return Err("Gecersiz kurulum dosyasi.".into());
     }
@@ -5841,30 +7865,30 @@ fn plugin_install(app: AppHandle, staged: String) -> Result<serde_json::Value, S
     validate_plugin_manifest(&manifest, &mut archive, &prefix)?;
     let id = manifest.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-    let target = plugins_root(&app)?.join(&id);
-    if target.exists() {
-        fs::remove_dir_all(&target).map_err(|e| format!("Eski surum silinemedi: {e}"))?;
+    let target = root.join(&id);
+    let fresh = staging_dir.join(format!("{id}.new-{}", uuid::Uuid::new_v4().simple()));
+    let old = staging_dir.join(format!("{id}.old-{}", uuid::Uuid::new_v4().simple()));
+    fs::create_dir_all(&fresh).map_err(|e| e.to_string())?;
+    if let Err(e) = extract_plugin_archive(&mut archive, &prefix, &fresh) {
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(e);
     }
-    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        // Zip-slip guard: only accept paths that stay inside the archive root.
-        let Some(enclosed) = entry.enclosed_name() else { continue };
-        let rel = enclosed.to_string_lossy().replace('\\', "/");
-        let Some(stripped) = rel.strip_prefix(&prefix) else { continue };
-        if stripped.is_empty() { continue; }
-        let out_path = target.join(stripped);
-        if entry.is_dir() {
-            fs::create_dir_all(&out_path).map_err(|e| e.to_string())?;
-            continue;
+    // Swap: old → aside, new → place; put the old one back on failure.
+    if target.exists() {
+        fs::rename(&target, &old).map_err(|e| {
+            let _ = fs::remove_dir_all(&fresh);
+            format!("Eski surum yerinden alinamadi (eklenti kullanimda olabilir): {e}")
+        })?;
+    }
+    if let Err(e) = fs::rename(&fresh, &target) {
+        if old.exists() {
+            let _ = fs::rename(&old, &target);
         }
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-        fs::write(&out_path, &buf).map_err(|e| e.to_string())?;
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(format!("Eklenti yerlestirilemedi: {e}"));
+    }
+    if old.exists() {
+        let _ = fs::remove_dir_all(&old);
     }
     let _ = fs::remove_file(&staged_path);
     append_activity(&app, "plugin.installed", manifest.get("name").and_then(|v| v.as_str()).map(String::from));
@@ -5910,6 +7934,13 @@ struct InstalledPluginEntry {
 fn plugins_list(app: AppHandle) -> Result<Vec<InstalledPluginEntry>, String> {
     let root = plugins_root(&app)?;
     let mut out = Vec::new();
+    // Safe-mode kill-switch: if a `.disabled` marker file exists in the
+    // plugins dir, load NOTHING. Recovery hatch for when a bad plugin
+    // freezes the UI — the user (or support) drops the file in without
+    // needing to reach Settings. Delete it to re-enable plugins.
+    if root.join(".disabled").exists() {
+        return Ok(out);
+    }
     let entries = match fs::read_dir(&root) { Ok(e) => e, Err(_) => return Ok(out) };
     for entry in entries.flatten() {
         let dir = entry.path();
@@ -5919,7 +7950,18 @@ fn plugins_list(app: AppHandle) -> Result<Vec<InstalledPluginEntry>, String> {
         let manifest_path = dir.join("heravex.plugin.json");
         let raw = match fs::read_to_string(&manifest_path) { Ok(s) => s, Err(_) => continue };
         let manifest: serde_json::Value = match serde_json::from_str(&raw) { Ok(v) => v, Err(_) => continue };
+        // The folder IS the id (installer guarantees it, the SDK documents
+        // it); uninstall deletes plugins/<id>, so a mismatch could never
+        // be removed from the UI. Same for entry paths leaving the folder.
+        let id = manifest.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !valid_plugin_id(id) || id != dir_name {
+            eprintln!("[plugins] skipped {dir_name}: manifest id '{id}' must match the folder name");
+            continue;
+        }
         let entry_name = manifest.get("entry").and_then(|v| v.as_str()).unwrap_or("index.js");
+        if entry_name.contains("..") || entry_name.starts_with('/') || entry_name.starts_with('\\') {
+            continue;
+        }
         let entry_path = dir.join(entry_name);
         if !entry_path.is_file() { continue; }
         out.push(InstalledPluginEntry {
@@ -5993,10 +8035,7 @@ async fn plugin_http_fetch(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() > 10 * 1024 * 1024 {
-        return Err("Yanit cok buyuk (10MB siniri).".into());
-    }
+    let bytes = read_body_capped(resp, 10 * 1024 * 1024, "Yanit").await?;
     Ok(PluginHttpResponse {
         status,
         body: String::from_utf8_lossy(&bytes).to_string(),
@@ -6023,7 +8062,7 @@ async fn plugin_http_fetch(
 /// every change into one yes/no event, which forced the UI to ask
 /// "something changed somewhere, refresh?". With per-file mtimes the
 /// UI can answer "what changed, who needs to know?" itself.
-#[tauri::command]
+#[tauri::command(async)]
 fn workspace_manifest(app: AppHandle) -> Result<std::collections::HashMap<String, u64>, String> {
     let root = data_root(&app)?;
     let mut out = std::collections::HashMap::new();
@@ -6044,16 +8083,32 @@ fn workspace_manifest(app: AppHandle) -> Result<std::collections::HashMap<String
                 visit(&p, root, depth + 1, out);
             } else if md.is_file() {
                 let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
-                // Only track files the frontend understands. Anything
-                // else is noise (cover images, build artifacts, etc.).
-                let track = rel.ends_with(".json") || rel == "heravex-members.json";
+                // Track JSON records plus the images teammates upload
+                // (covers / moodboard under library/<game>/assets/).
+                // Images arrive from the cloud client independently of
+                // the game JSON that references them — often seconds
+                // later — so the frontend needs to know when they land
+                // to retry the <img> that failed. Build artifacts and
+                // everything else stay untracked.
+                let lower = rel.to_lowercase();
+                let is_image = lower.starts_with("library/")
+                    && lower.contains("/assets/")
+                    && [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]
+                        .iter()
+                        .any(|ext| lower.ends_with(ext));
+                let track = rel.ends_with(".json") || is_image;
                 if !track { continue; }
+                // Milliseconds, not seconds: two teammate saves inside
+                // the same second used to share an mtime and the second
+                // one was never detected. The size is folded in so an
+                // in-place rewrite with a coarse mtime still registers.
+                // The frontend only compares values for equality.
                 let mtime = md.modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
+                    .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                out.insert(rel, mtime);
+                out.insert(rel, mtime.wrapping_mul(31).wrapping_add(md.len()));
             }
         }
     }
@@ -6061,7 +8116,7 @@ fn workspace_manifest(app: AppHandle) -> Result<std::collections::HashMap<String
     Ok(out)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn compute_workspace_signature(app: AppHandle) -> Result<String, String> {
     let root = data_root(&app)?;
     if !root.exists() {
@@ -6144,6 +8199,200 @@ fn compute_workspace_signature(app: AppHandle) -> Result<String, String> {
         file_count, total_size, max_mtime, name_hash, content_hash))
 }
 
+// ═══ System tray ═══════════════════════════════════════════════════════
+//
+// Closing the main window hides it instead of quitting, so team sync,
+// Pomodoro and reminders keep running from the tray (bottom-right on
+// Windows). The tray menu reopens the window and offers quick actions;
+// "Quit" is the real exit. Users can turn hide-on-close off in
+// Settings → General (`set_close_to_tray`).
+
+static CLOSE_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Settings → Startup "Minimise to tray": minimising hides the window to
+/// the tray instead of the taskbar. Off by default.
+static MINIMISE_TO_TRAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const TRAY_ID: &str = "heravex-tray";
+
+struct TrayMenuItems {
+    open: tauri::menu::MenuItem<tauri::Wry>,
+    new_task: tauri::menu::MenuItem<tauri::Wry>,
+    new_note: tauri::menu::MenuItem<tauri::Wry>,
+    pomodoro: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+/// [open, new task, new note, pomodoro, quit]
+fn tray_labels(lang: &str) -> [&'static str; 5] {
+    match lang {
+        "tr" => ["HeraVex'i aç", "Yeni görev", "Yeni not", "Pomodoro başlat / durdur", "Çıkış"],
+        "fr" => ["Ouvrir HeraVex", "Nouvelle tâche", "Nouvelle note", "Démarrer / arrêter Pomodoro", "Quitter"],
+        "es" => ["Abrir HeraVex", "Nueva tarea", "Nueva nota", "Iniciar / detener Pomodoro", "Salir"],
+        _ => ["Open HeraVex", "New task", "New note", "Start / stop Pomodoro", "Quit"],
+    }
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let lang = load_settings_from_disk(app.handle())
+        .ok()
+        .and_then(|s| s.preferred_language)
+        .unwrap_or_else(|| "tr".into());
+    let l = tray_labels(&lang);
+
+    let open = MenuItem::with_id(app, "tray-open", l[0], true, None::<&str>)?;
+    let new_task = MenuItem::with_id(app, "tray-new-task", l[1], true, None::<&str>)?;
+    let new_note = MenuItem::with_id(app, "tray-new-note", l[2], true, None::<&str>)?;
+    let pomodoro = MenuItem::with_id(app, "tray-pomodoro", l[3], true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "tray-quit", l[4], true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &PredefinedMenuItem::separator(app)?,
+            &new_task,
+            &new_note,
+            &pomodoro,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .tooltip("HeraVex")
+        .menu(&menu)
+        // Left click opens the app; the menu lives on right click.
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            let action = match event.id.as_ref() {
+                "tray-open" => None,
+                "tray-new-task" => Some("new-task"),
+                "tray-new-note" => Some("new-note"),
+                "tray-pomodoro" => Some("pomodoro"),
+                "tray-quit" => {
+                    app.exit(0);
+                    return;
+                }
+                _ => return,
+            };
+            // Pomodoro toggles in the background; the others need the UI.
+            if action != Some("pomodoro") {
+                show_main_window(app);
+            }
+            if let Some(a) = action {
+                let _ = app.emit("tray-action", a);
+            }
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+
+    app.manage(TrayMenuItems { open, new_task, new_note, pomodoro, quit });
+    Ok(())
+}
+
+// ── Multiple windows (v0.9.9, Settings → Startup) ───────────────────────────
+//
+// Extra windows load the app with `?window=secondary`. Every window keeps
+// its own copy of the data in memory, so a save in one must reach the
+// others or a stale window would write old data back. Each write path
+// calls `notify_windows`; with more than one window open it emits
+// `local-data-changed { kind, ids }` and every window re-reads just that
+// (its own save echoing back is a no-op on the frontend).
+
+static MULTI_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WINDOW_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+#[derive(Debug, Clone, Serialize)]
+struct LocalDataChanged {
+    kind: &'static str,
+    ids: Vec<String>,
+}
+
+/// `ids` empty = re-read everything of that kind.
+fn notify_windows(app: &AppHandle, kind: &'static str, ids: Vec<String>) {
+    if app.webview_windows().len() > 1 {
+        let _ = app.emit("local-data-changed", LocalDataChanged { kind, ids });
+    }
+}
+
+#[tauri::command]
+fn set_multi_window(enabled: bool) {
+    MULTI_WINDOW.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Open another app window, optionally on a given page. Must be async:
+/// building a window inside a sync (main-thread) command deadlocks on
+/// Windows.
+#[tauri::command]
+async fn open_app_window(app: AppHandle, tab: Option<String>) -> Result<String, String> {
+    if !MULTI_WINDOW.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Coklu pencere ayari kapali.".into());
+    }
+    let n = WINDOW_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let label = format!("win-{n}");
+    let tab = tab
+        .filter(|t| t.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(|t| format!("&tab={t}"))
+        .unwrap_or_default();
+    let url = tauri::WebviewUrl::App(format!("index.html?window=secondary{tab}").into());
+    tauri::WebviewWindowBuilder::new(&app, &label, url)
+        .title("HeraVex")
+        .inner_size(1180.0, 800.0)
+        .min_inner_size(900.0, 600.0)
+        .build()
+        .map_err(|e| format!("Pencere acilamadi: {e}"))?;
+    Ok(label)
+}
+
+/// Settings → Startup toggle. `false` = closing the window quits the app.
+#[tauri::command]
+fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Settings → Startup toggle. Ignored when the tray failed to start
+/// (there would be no way back to a hidden window).
+#[tauri::command]
+fn set_minimise_to_tray(app: AppHandle, enabled: bool) {
+    let has_tray = app.try_state::<TrayMenuItems>().is_some();
+    MINIMISE_TO_TRAY.store(enabled && has_tray, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Re-label the tray menu when the UI language changes.
+#[tauri::command]
+fn set_tray_language(app: AppHandle, language: String) -> Result<(), String> {
+    let Some(items) = app.try_state::<TrayMenuItems>() else { return Ok(()) };
+    let l = tray_labels(&language);
+    let _ = items.open.set_text(l[0]);
+    let _ = items.new_task.set_text(l[1]);
+    let _ = items.new_note.set_text(l[2]);
+    let _ = items.pomodoro.set_text(l[3]);
+    let _ = items.quit.set_text(l[4]);
+    Ok(())
+}
+
 fn start_workspace_watcher(app: AppHandle) {
     use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
     use std::sync::mpsc::channel;
@@ -6202,7 +8451,11 @@ fn start_workspace_watcher(app: AppHandle) {
             if let Ok(events) = res {
                 let relevant = events.iter().any(|e| {
                     let s = e.path.to_string_lossy().to_lowercase();
-                    s.contains("games") || s.contains("notes") || s.ends_with("activity.json")
+                    // atomic_write's `*.tmp` staging files are our own
+                    // writes in flight, never a teammate's change.
+                    if s.ends_with(".tmp") { return false; }
+                    s.contains("games") || s.contains("notes") || s.contains("library")
+                        || s.ends_with("activity.json")
                 });
                 if relevant {
                     println!("[watcher] workspace-updated fired ({} event(s))", events.len());
@@ -6215,14 +8468,60 @@ fn start_workspace_watcher(app: AppHandle) {
 
 fn main() {
     tauri::Builder::default()
+        // Must be the first plugin. With the app living in the tray, a
+        // second launch (desktop shortcut, Start menu) would otherwise
+        // start a second process writing the same workspace files. The
+        // second launch exits and the running one comes to the front.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             start_workspace_watcher(handle);
+            // A tray failure (e.g. no status-notifier host on some Linux
+            // desktops) must not stop the app; hide-on-close is turned
+            // off so the window can still be closed normally.
+            if let Err(e) = setup_tray(app) {
+                eprintln!("[tray] setup failed: {e}");
+                CLOSE_TO_TRAY.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main"
+                    && CLOSE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window.emit("hidden-to-tray", ());
+                }
+            }
+            // There is no "minimised" event; minimising fires a resize
+            // (to 0x0 on Windows), so check the state there. Reopening
+            // goes through `show_main_window`, which un-minimises first.
+            if let tauri::WindowEvent::Resized(_) = event {
+                if window.label() == "main"
+                    && MINIMISE_TO_TRAY.load(std::sync::atomic::Ordering::Relaxed)
+                    && window.is_minimized().unwrap_or(false)
+                    && window.is_visible().unwrap_or(false)
+                {
+                    let _ = window.hide();
+                    let _ = window.emit("hidden-to-tray", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            set_close_to_tray,
+            keychain_status,
+            set_secrets_in_keychain,
+            set_minimise_to_tray,
+            set_multi_window,
+            open_app_window,
+            set_tray_language,
             load_games,
+            load_games_by_ids,
             create_game,
             save_game,
             add_version_with_build,
@@ -6233,6 +8532,11 @@ fn main() {
             load_app_settings,
             set_preferred_language,
             save_global_expenses,
+            load_wallet,
+            wallet_upsert_expense,
+            wallet_delete_expense,
+            wallet_set_currencies,
+            import_legacy_wallet,
             save_exchange_rates,
             fetch_live_exchange_rates,
             team_read_members,
@@ -6277,6 +8581,22 @@ fn main() {
             save_image_to_disk,
             save_api_keys,
             pick_and_save_avatar,
+            pick_and_save_studio_logo,
+            storage_clear_cache,
+            storage_remove_temp,
+            storage_find_orphan_images,
+            storage_delete_orphan_images,
+            storage_integrity_check,
+            storage_prune_builds,
+            verify_backup,
+            save_text_file_dialog,
+            write_text_files_to_new_folder,
+            pick_and_read_text_files,
+            pick_and_read_text_file,
+            export_game_bundle,
+            import_game_bundle,
+            post_webhook,
+            clear_studio_logo,
             pick_directory,
             pick_google_play_json,
             pick_asset_file,
@@ -6301,8 +8621,16 @@ fn main() {
             plugin_http_fetch,
             export_backup_silent
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // macOS: clicking the Dock icon while the window is hidden in
+            // the tray brings it back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main_window(_app);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -6355,6 +8683,204 @@ mod tests {
     }
 
     #[test]
+    fn guarded_read_returns_content_and_io_errors() {
+        let dir = std::env::temp_dir().join(format!("hv-guarded-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.json");
+        fs::write(&file, "{\"ok\":true}").unwrap();
+        match read_text_guarded(&file) {
+            Ok(t) => assert_eq!(t, "{\"ok\":true}"),
+            Err(_) => panic!("plain local read must succeed"),
+        }
+        assert!(matches!(read_text_guarded(&dir.join("missing.json")), Err(ReadFail::Io(_))));
+        // A finished read must never leave a stall marker behind.
+        assert!(STALLED_READS.lock().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn wallet_expense(id: &str) -> ExpenseItem {
+        ExpenseItem {
+            id: id.into(),
+            title: format!("expense {id}"),
+            amount: 10.0,
+            category: "Tools".into(),
+            spent_at: "2026-09-01".into(),
+            notes: String::new(),
+            currency: Some("USD".into()),
+            is_recurring: None,
+            shared_with_game_ids: None,
+        }
+    }
+
+    fn wallet_tmp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hv_wallet_test_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn wallet_missing_file_is_none_and_corrupt_file_is_error() {
+        let root = wallet_tmp_root("read");
+        assert!(read_wallet(&root).unwrap().is_none());
+
+        // A corrupt wallet must never read as "empty" — a save would
+        // then overwrite the user's expenses.
+        fs::write(wallet_path(&root), b"{ not json").unwrap();
+        assert!(read_wallet(&root).is_err());
+
+        let w = WalletFile {
+            version: 1,
+            global_expenses: vec![wallet_expense("a")],
+            active_currencies: Some(vec!["USD".into(), "TRY".into()]),
+        };
+        write_wallet(&root, &w).unwrap();
+        let back = read_wallet(&root).unwrap().unwrap();
+        assert_eq!(back.global_expenses.len(), 1);
+        assert_eq!(back.active_currencies.unwrap(), vec!["USD".to_string(), "TRY".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expense_split_survives_a_round_trip() {
+        let mut e = wallet_expense("s");
+        e.shared_with_game_ids = Some(vec!["g1".into(), "g2".into()]);
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("sharedWithGameIds"));
+        let back: ExpenseItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.shared_with_game_ids.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn old_settings_without_claim_marker_still_parse() {
+        // settings.json written by v0.9.8 and earlier.
+        let raw = r#"{"preferredLanguage":"tr","globalExpenses":[{"id":"x","title":"Claude","amount":20,"category":"Tools","spentAt":"2026-01-01","notes":""}]}"#;
+        let s: AppSettings = serde_json::from_str(raw).unwrap();
+        assert_eq!(s.global_expenses.len(), 1);
+        assert!(s.legacy_wallet_claimed_by.is_none());
+    }
+
+    #[test]
+    fn legacy_offer_rules() {
+        let root = wallet_tmp_root("offer");
+        let other = wallet_tmp_root("offer_other");
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        settings.global_expenses = vec![wallet_expense("a"), wallet_expense("b")];
+        let empty = WalletFile::default();
+
+        // Nobody adopted it yet: offered.
+        assert_eq!(legacy_offer(&settings, &root, &empty), 2);
+        // Ids already in this wallet are not offered again.
+        let has_a = WalletFile { global_expenses: vec![wallet_expense("a")], ..WalletFile::default() };
+        assert_eq!(legacy_offer(&settings, &root, &has_a), 1);
+        // Adopted by this workspace: nothing to offer.
+        settings.legacy_wallet_claimed_by = Some(root.to_string_lossy().to_string());
+        assert_eq!(legacy_offer(&settings, &root, &empty), 0);
+        // Adopted by another workspace that still exists: not offered.
+        settings.legacy_wallet_claimed_by = Some(other.to_string_lossy().to_string());
+        assert_eq!(legacy_offer(&settings, &root, &empty), 0);
+        // ...but offered again if that folder is gone.
+        let _ = fs::remove_dir_all(&other);
+        assert_eq!(legacy_offer(&settings, &root, &empty), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn team_root_detection() {
+        let root = wallet_tmp_root("team");
+        assert!(!is_team_root(&root));
+        fs::create_dir_all(root.join("heravex-members")).unwrap();
+        assert!(is_team_root(&root));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn upgrade_adopts_old_wallet_once_and_keeps_the_backup() {
+        let local = wallet_tmp_root("up_local");
+        let other = wallet_tmp_root("up_other");
+        let team = wallet_tmp_root("up_team");
+        fs::create_dir_all(team.join("heravex-members")).unwrap();
+
+        // settings.json as v0.9.8 left it.
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        settings.global_expenses = vec![wallet_expense("a"), wallet_expense("b")];
+
+        // A team folder opened first: nothing adopted (no leak to
+        // teammates), the old list is offered instead, nothing written.
+        let t = load_wallet_at(&team, &mut settings, true).unwrap();
+        assert!(!t.migrated);
+        assert!(t.global_expenses.is_empty());
+        assert_eq!(t.legacy_available, 2);
+        assert!(!wallet_path(&team).exists());
+        assert!(settings.legacy_wallet_claimed_by.is_none());
+
+        // The first local workspace adopts it.
+        let l = load_wallet_at(&local, &mut settings, true).unwrap();
+        assert!(l.migrated);
+        assert_eq!(l.global_expenses.len(), 2);
+        assert_eq!(l.legacy_available, 0);
+        assert!(wallet_path(&local).exists());
+        assert!(settings.legacy_wallet_claimed_by.is_some());
+        // The old list is never cleared.
+        assert_eq!(settings.global_expenses.len(), 2);
+
+        // Reloading the same workspace reads its file, no second adoption.
+        let again = load_wallet_at(&local, &mut settings, true).unwrap();
+        assert!(!again.migrated);
+        assert_eq!(again.global_expenses.len(), 2);
+
+        // Any other workspace starts with an empty wallet of its own.
+        let o = load_wallet_at(&other, &mut settings, true).unwrap();
+        assert!(!o.migrated);
+        assert!(o.global_expenses.is_empty());
+        assert_eq!(o.legacy_available, 0);
+
+        for d in [&local, &other, &team] {
+            let _ = fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn corrupt_wallet_is_an_error_and_is_left_alone() {
+        let root = wallet_tmp_root("corrupt");
+        fs::write(wallet_path(&root), b"{ half written").unwrap();
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        settings.global_expenses = vec![wallet_expense("a")];
+        assert!(load_wallet_at(&root, &mut settings, true).is_err());
+        assert_eq!(fs::read_to_string(wallet_path(&root)).unwrap(), "{ half written");
+        assert!(settings.legacy_wallet_claimed_by.is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restoring_an_old_backup_writes_its_wallet_without_a_second_adoption() {
+        let root = wallet_tmp_root("restore");
+        // Backup from v0.9.8: expenses only inside settings.
+        let mut old: AppSettings = serde_json::from_str("{}").unwrap();
+        old.global_expenses = vec![wallet_expense("from-backup")];
+
+        let restored = restore_wallet_at(&root, None, old, Some("C:/elsewhere".into())).unwrap();
+        let w = read_wallet(&root).unwrap().unwrap();
+        assert_eq!(w.global_expenses[0].id, "from-backup");
+        // This install's adoption marker wins.
+        assert_eq!(restored.legacy_wallet_claimed_by.as_deref(), Some("C:/elsewhere"));
+
+        // New-format backup: the wallet itself is restored.
+        let fresh: AppSettings = serde_json::from_str("{}").unwrap();
+        let bw = WalletFile {
+            version: 1,
+            global_expenses: vec![wallet_expense("x")],
+            active_currencies: Some(vec!["USD".into(), "EUR".into()]),
+        };
+        let restored = restore_wallet_at(&root, Some(bw), fresh, None).unwrap();
+        let w = read_wallet(&root).unwrap().unwrap();
+        assert_eq!(w.global_expenses[0].id, "x");
+        assert_eq!(w.active_currencies.unwrap().len(), 2);
+        assert!(restored.legacy_wallet_claimed_by.is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn atomic_write_creates_and_replaces() {
         let dir = std::env::temp_dir();
         let path: PathBuf = dir.join("studio_hub_test_atomic.json");
@@ -6403,6 +8929,481 @@ mod tests {
             board_columns: Vec::new(),
         };
         assert_eq!(game_folder_name(&game), "my-cool-game-abc123");
+    }
+
+    #[test]
+    fn press_kit_shows_the_studio_logo() {
+        let dir = std::env::temp_dir().join(format!("hv_presskit_logo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let logo = dir.join("my-logo.png");
+        fs::write(&logo, b"not really a png").unwrap();
+        let game = GameRecord {
+            id: "g1".into(),
+            title: "Logo Game".into(),
+            summary: "".into(),
+            status: "Demo".into(),
+            platforms: vec![],
+            tags: vec![],
+            notes: "".into(),
+            tasks: vec![],
+            versions: vec![],
+            cover_data_url: None,
+            current_build_relative_path: None,
+            expenses: vec![],
+            release_timeline: vec![],
+            moodboard: Moodboard::default(),
+            stores: GameStores {
+                itch: StoreConnection { enabled: false, external_id: "".into(), label: "".into() },
+                steam: StoreConnection { enabled: false, external_id: "".into(), label: "".into() },
+                play: StoreConnection { enabled: false, external_id: "".into(), label: "".into() },
+            },
+            custom_links: Vec::new(),
+            store_mappings: StoreMappings::default(),
+            updated_at: "2024-01-01T00:00:00Z".into(),
+            budget: None,
+            currency: None,
+            butler_target: None,
+            butler_build_path: None,
+            board_columns: Vec::new(),
+        };
+        let input = PressKitInput {
+            developer: "Moth Studio".into(),
+            studio_logo_path: logo.to_string_lossy().to_string(),
+            ..PressKitInput::default()
+        };
+        let index = render_press_kit(&game, &dir, &input).unwrap();
+        let html = fs::read_to_string(PathBuf::from(&index).join("index.html"))
+            .or_else(|_| fs::read_to_string(&index))
+            .unwrap();
+        assert!(html.contains("assets/images/studio-logo.png"));
+        assert!(html.contains("Moth Studio"));
+        assert!(dir.join("logo-game-press-kit/assets/images/studio-logo.png").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn storage_test_game(id: &str, title: &str) -> GameRecord {
+        GameRecord {
+            id: id.into(),
+            title: title.into(),
+            summary: "".into(),
+            status: "Demo".into(),
+            platforms: vec![],
+            tags: vec![],
+            notes: "".into(),
+            tasks: vec![],
+            versions: vec![],
+            cover_data_url: None,
+            current_build_relative_path: None,
+            expenses: vec![],
+            release_timeline: vec![],
+            moodboard: Moodboard::default(),
+            stores: GameStores {
+                itch: StoreConnection { enabled: false, external_id: "".into(), label: "".into() },
+                steam: StoreConnection { enabled: false, external_id: "".into(), label: "".into() },
+                play: StoreConnection { enabled: false, external_id: "".into(), label: "".into() },
+            },
+            custom_links: Vec::new(),
+            store_mappings: StoreMappings::default(),
+            updated_at: "2024-01-01T00:00:00Z".into(),
+            budget: None,
+            currency: None,
+            butler_target: None,
+            butler_build_path: None,
+            board_columns: Vec::new(),
+        }
+    }
+
+    fn storage_version(id: &str, build: Option<&str>) -> VersionItem {
+        VersionItem {
+            id: id.into(),
+            version: format!("v{id}"),
+            notes: String::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            build_file_name: build.map(|b| b.rsplit('/').next().unwrap_or(b).to_string()),
+            build_relative_path: build.map(|b| b.to_string()),
+            build_file_size_bytes: None,
+            build_pruned_at: None,
+        }
+    }
+
+    fn storage_tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hv_storage_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn temp_leftover_names() {
+        assert!(is_temp_leftover("games.json.1234.7.tmp"));
+        assert!(is_temp_leftover("auto-20260101.zip.part"));
+        assert!(!is_temp_leftover("games.json"));
+        assert!(!is_temp_leftover("cover.png"));
+    }
+
+    #[test]
+    fn orphan_images_are_only_unreferenced_asset_images() {
+        let root = storage_tmp("orphans");
+        let assets = root.join("library/game-a/assets/images");
+        fs::create_dir_all(&assets).unwrap();
+        fs::create_dir_all(root.join("library/game-a/versions/v1-x")).unwrap();
+        fs::create_dir_all(root.join("games")).unwrap();
+        fs::write(assets.join("a_111.png"), b"used").unwrap();
+        fs::write(assets.join("a_222.png"), b"orphan").unwrap();
+        fs::write(assets.join("a_333.jpg"), b"used by a note").unwrap();
+        // Builds are never images to clean, even unreferenced.
+        fs::write(root.join("library/game-a/versions/v1-x/shot.png"), b"build").unwrap();
+        fs::write(root.join("games/a.json"), r#"{"coverDataUrl":"C:/Users/ali/Drive/library/game-a/assets/images/a_111.png"}"#).unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("notes/n.json"), r#"{"content":"![](a_333.jpg)"}"#).unwrap();
+
+        let found = find_orphans_at(&root, 0).unwrap();
+        let names: Vec<&str> = found.iter().map(|o| o.relative.as_str()).collect();
+        assert_eq!(names, vec!["library/game-a/assets/images/a_222.png"]);
+
+        // Freshly written files are left alone (cloud sync in flight).
+        assert!(find_orphans_at(&root, 3600).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_keeps_newest_builds_and_the_current_one() {
+        let mut g = storage_test_game("g1", "Prune Me");
+        // Newest first; v3 is pinned as current even though it's old.
+        g.versions = vec![
+            storage_version("5", Some("prune-me-g1/versions/v5-5/b.zip")),
+            storage_version("4", Some("prune-me-g1/versions/v4-4/b.zip")),
+            storage_version("note-only", None),
+            storage_version("3", Some("prune-me-g1/versions/v3-3/b.zip")),
+            storage_version("2", Some("prune-me-g1/versions/v2-2/b.zip")),
+            storage_version("1", Some("prune-me-g1/versions/v1-1/b.zip")),
+        ];
+        g.current_build_relative_path = Some("prune-me-g1/versions/v3-3/b.zip".into());
+        assert_eq!(builds_to_prune(&g, 2), vec![4, 5]);
+
+        let lib = storage_tmp("prune");
+        for v in ["v5-5", "v4-4", "v3-3", "v2-2", "v1-1"] {
+            let d = lib.join("prune-me-g1/versions").join(v);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("b.zip"), vec![0u8; 100]).unwrap();
+        }
+        let mut res = PruneResult::default();
+        assert!(prune_game_builds(&lib, &mut g, 2, &mut res));
+        assert_eq!(res.files, 2);
+        assert_eq!(res.bytes, 200);
+        assert!(lib.join("prune-me-g1/versions/v5-5/b.zip").exists());
+        assert!(lib.join("prune-me-g1/versions/v3-3/b.zip").exists());
+        assert!(!lib.join("prune-me-g1/versions/v2-2").exists());
+        assert!(!lib.join("prune-me-g1/versions/v1-1").exists());
+        // Version entries stay, marked as pruned.
+        assert_eq!(g.versions.len(), 6);
+        assert!(g.versions[4].build_relative_path.is_none());
+        assert!(g.versions[4].build_pruned_at.is_some());
+        assert!(g.versions[3].build_relative_path.is_some());
+        // Nothing left to prune on a second run.
+        assert!(!prune_game_builds(&lib, &mut g, 2, &mut PruneResult::default()));
+        let _ = fs::remove_dir_all(&lib);
+    }
+
+    #[test]
+    fn integrity_check_reports_corrupt_and_missing_files() {
+        let root = storage_tmp("integrity");
+        fs::create_dir_all(root.join("games")).unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        let mut g = storage_test_game("ok1", "Fine Game");
+        g.versions = vec![storage_version("1", Some("fine-game-ok1/versions/v1-1/gone.zip"))];
+        fs::write(root.join("games/ok1.json"), serde_json::to_string(&g).unwrap()).unwrap();
+        fs::write(root.join("games/bad.json"), b"{ broken").unwrap();
+        fs::write(root.join("notes/n1.json"), b"[not a note]").unwrap();
+        fs::write(root.join("games/ok1.json.99.1.tmp"), b"x").unwrap();
+
+        let r = integrity_check_at(None, &root);
+        let kinds: Vec<&str> = r.problems.iter().map(|p| p.kind.as_str()).collect();
+        assert!(kinds.contains(&"corrupt"), "{kinds:?}");
+        assert!(kinds.contains(&"missingBuild"), "{kinds:?}");
+        assert!(kinds.contains(&"tempLeftover"), "{kinds:?}");
+        assert_eq!(r.problems.iter().filter(|p| p.kind == "corrupt").count(), 2);
+        assert_eq!(r.checked_files, 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn write_test_backup(path: &Path, manifest: &str, library: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(1));
+        zip.start_file("manifest.json", opts).unwrap();
+        zip.write_all(manifest.as_bytes()).unwrap();
+        for (name, bytes) in library {
+            zip.start_file(format!("library/{name}"), opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    const GOOD_MANIFEST: &str = r#"{"version":2,"exportedAt":"2026-10-01","settings":{},"games":[],"notes":[],"wallet":{"version":1,"globalExpenses":[]}}"#;
+
+    #[test]
+    fn verify_accepts_a_good_backup_and_rejects_broken_ones() {
+        let dir = storage_tmp("verify");
+        let good = dir.join("manual-20261001-100000.zip");
+        write_test_backup(&good, GOOD_MANIFEST, &[("g/assets/a.png", b"img")]);
+        let r = verify_backup_at(&good);
+        assert!(r.ok, "{:?}", r.problems);
+        assert_eq!(r.files, 1);
+        assert!(r.has_wallet);
+
+        let bad_manifest = dir.join("manual-20261001-110000.zip");
+        write_test_backup(&bad_manifest, r#"{"version":2,"games":[{"nope":1}]}"#, &[]);
+        assert!(!verify_backup_at(&bad_manifest).ok);
+
+        let unsafe_path = dir.join("manual-20261001-120000.zip");
+        write_test_backup(&unsafe_path, GOOD_MANIFEST, &[("../../evil.txt", b"x")]);
+        assert!(!verify_backup_at(&unsafe_path).ok);
+
+        let truncated = dir.join("manual-20261001-130000.zip");
+        let bytes = fs::read(&good).unwrap();
+        fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
+        assert!(!verify_backup_at(&truncated).ok);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retention_deletes_only_old_automatic_backups() {
+        let dir = storage_tmp("retention");
+        for n in ["auto-20261001-010000.zip", "auto-20261002-010000.zip", "auto-20261003-010000.zip",
+                  "manual-20260901-010000.zip", "notes.txt"] {
+            fs::write(dir.join(n), b"x").unwrap();
+        }
+        assert_eq!(apply_retention(&dir, 2), 1);
+        assert!(!dir.join("auto-20261001-010000.zip").exists());
+        assert!(dir.join("auto-20261003-010000.zip").exists());
+        assert!(dir.join("manual-20260901-010000.zip").exists());
+        assert!(dir.join("notes.txt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mirror_copy_lands_complete() {
+        let dir = storage_tmp("mirror_src");
+        let mirror = storage_tmp("mirror_dst");
+        let src = dir.join("auto-20261001-010000.zip");
+        write_test_backup(&src, GOOD_MANIFEST, &[]);
+        let copied = copy_to_mirror(&src, &mirror).unwrap();
+        assert!(verify_backup_at(&copied).ok);
+        assert!(!mirror.join("auto-20261001-010000.zip.part").exists());
+        assert!(copy_to_mirror(&src, &mirror.join("missing")).is_err());
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&mirror);
+    }
+
+    #[test]
+    fn compressing_old_backups_keeps_them_valid_and_dated() {
+        let dir = storage_tmp("compress");
+        let big: Vec<u8> = b"HeraVex backup payload ".iter().cycle().take(200_000).copied().collect();
+        let names = ["auto-20261001-010000.zip", "auto-20261002-010000.zip",
+                     "auto-20261003-010000.zip", "auto-20261004-010000.zip"];
+        for n in names {
+            write_test_backup(&dir.join(n), GOOD_MANIFEST, &[("g/notes.txt", &big)]);
+        }
+        let oldest = dir.join(names[0]);
+        let mtime_before = fs::metadata(&oldest).unwrap().modified().unwrap();
+        let size_before = fs::metadata(&oldest).unwrap().len();
+
+        let saved = compress_old_backups(&dir, 3);
+        assert!(saved > 0);
+        assert!(fs::metadata(&oldest).unwrap().len() < size_before);
+        assert!(verify_backup_at(&oldest).ok);
+        assert!(zip_is_marked_compressed(&oldest));
+        assert_eq!(fs::metadata(&oldest).unwrap().modified().unwrap(), mtime_before);
+        // The newest three are left alone, and nothing is re-packed twice.
+        assert!(!zip_is_marked_compressed(&dir.join(names[3])));
+        assert_eq!(compress_old_backups(&dir, 3), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_file_names_cannot_escape_or_break_windows() {
+        assert_eq!(safe_file_name("../../etc/passwd"), "-..-etc-passwd");
+        assert_eq!(safe_file_name("Plan: v2?.md"), "Plan- v2-.md");
+        assert_eq!(safe_file_name("   "), "untitled");
+        assert_eq!(safe_file_name("CON.md"), "_CON.md");
+        assert!(!safe_file_name("a/b\\c").contains('/'));
+    }
+
+    #[test]
+    fn writing_exports_never_overwrites_existing_files() {
+        let dir = storage_tmp("write_export");
+        fs::create_dir_all(dir.join("Notes")).unwrap();
+        fs::write(dir.join("Notes/keep.md"), b"mine").unwrap();
+        let out = write_text_files_to_new_folder(
+            dir.to_string_lossy().to_string(),
+            "Notes".into(),
+            vec![
+                TextFileOut { name: "Idea.md".into(), contents: "one".into() },
+                TextFileOut { name: "idea.md".into(), contents: "two".into() },
+                TextFileOut { name: "../escape.md".into(), contents: "three".into() },
+            ],
+        )
+        .unwrap();
+        let out = PathBuf::from(out);
+        assert_eq!(out.file_name().unwrap().to_string_lossy(), "Notes (2)");
+        assert_eq!(fs::read_to_string(dir.join("Notes/keep.md")).unwrap(), "mine");
+        assert_eq!(fs::read_to_string(out.join("Idea.md")).unwrap(), "one");
+        assert_eq!(fs::read_to_string(out.join("idea (2).md")).unwrap(), "two");
+        assert!(out.join("-escape.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notion_style_nested_zip_is_read() {
+        use std::io::Write;
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut inner = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        inner.start_file("Workspace/Page abc0123456789abcdef0123456789abcd.md", opts).unwrap();
+        inner.write_all("# Page\nhello".as_bytes()).unwrap();
+        inner.start_file("Workspace/image.png", opts).unwrap();
+        inner.write_all(b"png").unwrap();
+        let inner_bytes = inner.finish().unwrap().into_inner();
+
+        let mut outer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        outer.start_file("Export-Part-1.zip", opts).unwrap();
+        outer.write_all(&inner_bytes).unwrap();
+        outer.start_file("__MACOSX/junk.md", opts).unwrap();
+        outer.write_all(b"junk").unwrap();
+        let outer_bytes = outer.finish().unwrap().into_inner();
+
+        let mut files = Vec::new();
+        read_text_files_from_zip_reader(std::io::Cursor::new(outer_bytes), &["md".to_string()], 0, &mut files).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].relative.ends_with(".md"));
+        assert!(files[0].contents.contains("hello"));
+    }
+
+    #[test]
+    fn game_bundle_drops_builds_and_remaps_images() {
+        let mut g = storage_test_game("old", "Bundle Me");
+        g.cover_data_url = Some("C:\\Users\\ali\\Drive\\library\\bundle-me-old\\assets\\images\\old_111.png".into());
+        g.current_build_relative_path = Some("bundle-me-old/versions/v1-1/b.zip".into());
+        g.versions = vec![storage_version("1", Some("bundle-me-old/versions/v1-1/b.zip"))];
+        let bundled = game_for_bundle(&g);
+        assert!(bundled.current_build_relative_path.is_none());
+        assert!(bundled.versions[0].build_relative_path.is_none());
+        assert_eq!(bundled.versions.len(), 1); // the entry itself stays
+
+        let mut imported = bundled.clone();
+        let mut by_name = std::collections::HashMap::new();
+        by_name.insert("old_111.png".to_string(), PathBuf::from("D:/ws/library/bundle-me-new/assets/images/old_111.png"));
+        remap_bundle_paths(&mut imported, &by_name);
+        assert_eq!(
+            imported.cover_data_url.as_deref(),
+            Some("D:/ws/library/bundle-me-new/assets/images/old_111.png")
+        );
+    }
+
+    #[test]
+    fn keychain_off_leaves_keys_in_the_file() {
+        let mut s: AppSettings = serde_json::from_str(r#"{"steamApiKey":"S","itchApiKey":"I"}"#).unwrap();
+        fill_secrets(&mut s);
+        assert_eq!(s.steam_api_key.as_deref(), Some("S"));
+        let on_disk = strip_secrets(&s).unwrap();
+        assert_eq!(on_disk.itch_api_key.as_deref(), Some("I"));
+        assert_eq!(settings_for_backup(s).steam_api_key.as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn keychain_keys_stay_out_of_backups_and_restores_keep_the_choice() {
+        let mut on: AppSettings = serde_json::from_str("{}").unwrap();
+        on.secrets_in_keychain = true;
+        on.steam_api_key = Some("S".into());
+        assert!(settings_for_backup(on.clone()).steam_api_key.is_none());
+
+        // Old backup with plain keys restored while the keychain is on:
+        // the choice stays on, the restored key wins.
+        let mut restored: AppSettings = serde_json::from_str(r#"{"itchApiKey":"OLD"}"#).unwrap();
+        keep_keychain_choice(&mut restored, Some(&on));
+        assert!(restored.secrets_in_keychain);
+        assert_eq!(restored.itch_api_key.as_deref(), Some("OLD"));
+        assert_eq!(restored.steam_api_key.as_deref(), Some("S"));
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn os_keychain_round_trip() {
+        let name = format!("heravex-test-{}", std::process::id());
+        os_secrets::set(&name, Some("secret-123")).unwrap();
+        assert_eq!(os_secrets::get(&name).unwrap().as_deref(), Some("secret-123"));
+        os_secrets::set(&name, None).unwrap();
+        assert_eq!(os_secrets::get(&name).unwrap(), None);
+        // Deleting what isn't there is fine.
+        os_secrets::set(&name, None).unwrap();
+    }
+
+    fn write_zip(path: &Path, files: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        let o = zip::write::SimpleFileOptions::default();
+        for (n, b) in files {
+            z.start_file(*n, o).unwrap();
+            z.write_all(b).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn every_sdk_example_installs_from_its_zip() {
+        let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../plugin-sdk");
+        for name in ["example-plugin", "god-mode", "theme-pack", "color-kit", "deadline-heatmap"] {
+            let mut archive = zip::ZipArchive::new(fs::File::open(sdk.join(format!("{name}.zip"))).unwrap()).unwrap();
+            let (prefix, manifest) = zip_find_manifest(&mut archive).unwrap();
+            validate_plugin_manifest(&manifest, &mut archive, &prefix).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let dest = storage_tmp(&format!("plugin_{name}"));
+            extract_plugin_archive(&mut archive, &prefix, &dest).unwrap();
+            assert!(dest.join("heravex.plugin.json").is_file(), "{name}");
+            let entry = manifest.get("entry").and_then(|v| v.as_str()).unwrap_or("index.js");
+            assert!(dest.join(entry).is_file(), "{name}");
+            let _ = fs::remove_dir_all(&dest);
+        }
+    }
+
+    #[test]
+    fn plugin_archive_cannot_escape_or_explode() {
+        let dir = storage_tmp("plugin_evil");
+        let manifest = br#"{"id":"evil","name":"Evil","version":"1","apiVersion":1}"#;
+        let zip_path = dir.join("evil.zip");
+        write_zip(&zip_path, &[
+            ("heravex.plugin.json", manifest),
+            ("index.js", b"export default () => {}"),
+            ("../../outside.txt", b"escape"),
+        ]);
+        let mut a = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        let (prefix, m) = zip_find_manifest(&mut a).unwrap();
+        validate_plugin_manifest(&m, &mut a, &prefix).unwrap();
+        let dest = dir.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        extract_plugin_archive(&mut a, &prefix, &dest).unwrap();
+        assert!(dest.join("index.js").is_file());
+        assert!(!dir.join("outside.txt").exists());
+        assert!(!dir.parent().unwrap().join("outside.txt").exists());
+
+        // Unpacked size cap.
+        let big = vec![0u8; (PLUGIN_MAX_UNPACKED as usize) + 10];
+        let bomb = dir.join("bomb.zip");
+        write_zip(&bomb, &[("heravex.plugin.json", manifest), ("index.js", b"x"), ("pad.bin", &big)]);
+        let mut b = zip::ZipArchive::new(fs::File::open(&bomb).unwrap()).unwrap();
+        let dest2 = dir.join("out2");
+        fs::create_dir_all(&dest2).unwrap();
+        assert!(extract_plugin_archive(&mut b, "", &dest2).is_err());
+
+        // Bad manifests are refused before anything is written.
+        let bad = dir.join("bad.zip");
+        write_zip(&bad, &[("heravex.plugin.json", br#"{"id":"Bad ID","name":"x","apiVersion":1}"#), ("index.js", b"")]);
+        let mut c = zip::ZipArchive::new(fs::File::open(&bad).unwrap()).unwrap();
+        let (p2, m2) = zip_find_manifest(&mut c).unwrap();
+        assert!(validate_plugin_manifest(&m2, &mut c, &p2).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── M6: Moodboard migration tests ─────────────────────────────────────

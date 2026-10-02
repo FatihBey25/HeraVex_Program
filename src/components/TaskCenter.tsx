@@ -3,6 +3,7 @@ import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
 import { FileText, ExternalLink, Plus, X, Inbox, ListTodo } from "lucide-react";
 import { EmptyState } from "./shared/EmptyState";
 import { useEscape } from "../lib/keyboard";
+import { consumeCreate } from "../lib/createIntents";
 import { GENERAL_GAME_TAG, GENERAL_GAME_ID, isGeneralGame, findGeneralGame } from "../lib/general-game";
 import { useAppStore, selectAllTasks } from "../store";
 import { taskDeadlineLabel, dueToneClass, priorityLabel } from "../lib/i18n";
@@ -30,10 +31,25 @@ export function TaskCenter() {
   const {
     games, activeTaskId, setActiveTaskId, setWorkspaceTab, setSelectedId,
     toggleTask, deleteTask, updateTaskInGame, handleSaveGame, handleCreateGame,
-    language, ui,
+    language, ui, showToast,
   } = useAppStore();
 
   const [showAdd, setShowAdd] = useState(false);
+  const [addPrefillTitle, setAddPrefillTitle] = useState("");
+
+  // Tray menu / shortcuts / "+" button / Dashboard capture park a
+  // request in createIntents; take it on mount and while mounted.
+  useEffect(() => {
+    const take = () => {
+      const intent = consumeCreate("task");
+      if (!intent) return;
+      setAddPrefillTitle(intent.title ?? "");
+      setShowAdd(true);
+    };
+    take();
+    window.addEventListener("heravex:new-task", take);
+    return () => window.removeEventListener("heravex:new-task", take);
+  }, []);
 
   const [searchQuery, setSearchQuery]     = useState("");
   const [viewMode, setViewMode]           = useState<ViewMode>("list");
@@ -185,6 +201,9 @@ export function TaskCenter() {
     const cols = focalGame.boardColumns ?? [];
     const target = cols.find((c) => c.id === colId);
     if (!target || target.isDone) return; // Done is undeletable
+    // Snapshot the full game so the toast's "Undo" can restore columns
+    // AND the tasks' original boardColumnId assignments exactly.
+    const snapshot = focalGame;
     // Move tasks from the deleted column to the first non-done column.
     const fallback = cols.find((c) => c.id !== colId && !c.isDone)?.id
                   ?? cols.find((c) => c.isDone)?.id
@@ -194,7 +213,13 @@ export function TaskCenter() {
     );
     const nextCols = cols.filter((c) => c.id !== colId);
     void handleSaveGame({ ...focalGame, boardColumns: nextCols, tasks: nextTasks });
-  }, [focalGame, handleSaveGame]);
+    showToast(
+      language === "tr" ? `"${target.title}" sütunu silindi` : `Column "${target.title}" deleted`,
+      "info",
+      () => { void handleSaveGame(snapshot); },
+      language === "tr" ? "Geri al" : "Undo",
+    );
+  }, [focalGame, handleSaveGame, showToast, language]);
 
   const handleReorderColumns = useCallback((movedId: string, targetId: string) => {
     if (!focalGame) return;
@@ -271,12 +296,10 @@ export function TaskCenter() {
           <div className="view-toggle">
             <button
               className="primary-button compact-button elevated-button task-add-btn"
-              onClick={() => setShowAdd((s) => !s)}
+              onClick={() => { setAddPrefillTitle(""); setShowAdd((s) => !s); }}
               title={language === "tr" ? "Yeni görev ekle" : "Add new task"}
             >
-              {showAdd
-                ? <><X size={13} style={{ marginRight: 5 }} />{language === "tr" ? "Kapat" : "Close"}</>
-                : <><Plus size={13} style={{ marginRight: 5 }} />{language === "tr" ? "Yeni Görev" : "New Task"}</>}
+              <Plus size={13} style={{ marginRight: 5 }} />{language === "tr" ? "Yeni Görev" : "New Task"}
             </button>
             <button
               className={`filter-chip ${viewMode === "list" ? "filter-chip-active" : ""}`}
@@ -306,6 +329,7 @@ export function TaskCenter() {
         <AnimatePresence>
           {showAdd && (
             <AddTaskModal
+              initialTitle={addPrefillTitle}
               games={games}
               defaultGameId={
                 activeTask?.gameId ??
@@ -877,8 +901,9 @@ function RelatedNoteField({
 // ── Add task form ─────────────────────────────────────────────────────────────
 
 function AddTaskModal({
-  games, defaultGameId, language, ui, onCreate, onClose,
+  initialTitle = "", games, defaultGameId, language, ui, onCreate, onClose,
 }: {
+  initialTitle?: string;
   games: ReturnType<typeof useAppStore.getState>["games"];
   defaultGameId: string;
   language: string;
@@ -888,7 +913,7 @@ function AddTaskModal({
 }) {
   const tr = (en: string, t: string) => (language === "tr" ? t : en);
   useEscape(onClose);
-  const [titleDraft, setTitleDraft] = useState("");
+  const [titleDraft, setTitleDraft] = useState(initialTitle);
   const [descDraft, setDescDraft] = useState("");
   const [priorityDraft, setPriorityDraft] = useState<1 | 2 | 3>(2);
   const [dueDateDraft, setDueDateDraft] = useState("");

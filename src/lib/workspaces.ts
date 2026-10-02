@@ -107,6 +107,16 @@ export function addWorkspace(
   return ws;
 }
 
+/** Forget a workspace: drop it from the registry. Files on disk are
+ *  untouched — this only removes the entry. The synthetic "default"
+ *  entry can never be removed. Returns the updated list. */
+export function removeWorkspace(id: string): Workspace[] {
+  if (id === "default") return loadWorkspaces();
+  const list = loadWorkspaces().filter((w) => w.id !== id);
+  saveWorkspaces(list);
+  return list;
+}
+
 /** Best-effort detection of a cloud-sync provider from a workspace path.
  *
  *  We intentionally use only stable hint strings present in the default

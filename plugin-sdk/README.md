@@ -87,7 +87,7 @@ Kurallar:
 3. İzin onayından sonra eklenti aktifleşir; sayfalar sidebar'da
    **EKLENTİLER** altında belirir.
 
-Kurulum yeri: `%LOCALAPPDATA%/app.heravex/plugins/<id>/` (kuruluma özel,
+Kurulum yeri: `%APPDATA%\app.heravex\studio-data\plugins\<id>\` (kuruluma özel,
 workspace'e değil — ekip klasörü üzerinden kod yayılmaz).
 
 ### Güç katmanı — "Minecraft seviyesi" API'ler (v0.9.9+)
@@ -100,7 +100,9 @@ temizlenir.
 | API | İzin | Ne yapar |
 |---|---|---|
 | `hv.dom.injectStyle(css)` | `dom` | Uygulamaya stylesheet enjekte et — tam tema gücü |
-| `hv.dom.onElement(sel, cb)` | `dom` | Seçiciye uyan mevcut **ve gelecekteki** her elemente müdahale (buton ekle, davranış değiştir) |
+| `hv.dom.onElement(sel, cb)` | `dom` | Seçiciye uyan elemente müdahale (⚠️ React'in çocuklarına dokunma) |
+| `hv.dom.mountToSlot(slot, el)` | `dom` | **GÜVENLİ enjeksiyon** — çekirdeğin `data-hv-slot` noktasına eleman ekle |
+| `hv.themes.register({id,label,css,preview?,previewAccent?})` | `dom` | **GÜVENLİ tema** — Ayarlar → Görünüm'deki **hızlı tema seçicisine** önizleme kartı ekler (sidebar+ana arka plan); çekirdek uygular/geri alır |
 | `hv.hooks.filter(hook, fn)` | `hooks` | `game:beforeSave`, `note:beforeSave`, `*:beforeDelete`… — veriyi **değiştir** ya da `null` döndürüp **engelle** |
 | `hv.hooks.on(hook, fn)` | `hooks` | İşlem sonrası bildirim (`*:afterSave`, `*:afterDelete`) |
 | `hv.store.watch(sel, cb)` | `hooks` | Store'daki herhangi bir dilimi canlı izle |
@@ -130,14 +132,43 @@ hv.editor.addSlashCommand({
 });
 ```
 
-> ⚠️ **DOM güvenlik kuralı (Dracula dersi):** `hv.dom.onElement` ile
-> React'in yönettiği bir konteynıra **çocuk EKLEME** ya da React'in
-> sahip olduğu bir düğümü **KALDIRMA** — React'in reconciliation'ı
-> `removeChild` hatasıyla uygulamayı çökertebilir. Güvenli desen: kendi
-> elemanını `document.body`'ye ekle (ör. `position:fixed` overlay), ya da
-> mevcut bir elemanın SADECE stil/attribute'unu değiştir; asla React'in
-> child listesine dokunma. Seçiciler (`.nav-item`, `.panel`…) sürümler
-> arasında değişebilir — büyük sürümlerde test et.
+Güvenli tema + ikon ekleme (v0.9.9 — Dracula'nın çökme yaşamadan yapılan hâli):
+
+```js
+export default function activate(hv) {
+  // Ayarlar → Tema'ya güvenli bir tema pill'i (çekirdek uygular/geri alır):
+  hv.themes.register({
+    id: "dracula",
+    label: "🧛 Dracula",
+    css: ":root{--accent:#bd93f9!important} body,#root,.workspace{background:#282a36!important}",
+  });
+  // Sidebar nav altına güvenle bir kart bas:
+  const card = document.createElement("div");
+  card.textContent = "🎨 Theme Pack";
+  hv.dom.mountToSlot("sidebar-nav-end", card);
+}
+```
+
+Resmi `data-hv-slot` noktaları: `sidebar-nav-end`, `dashboard-top`.
+(Yenileri talebe göre eklenir.)
+
+> ⚠️ **DOM güvenlik kuralı (Dracula dersi):** Tema/ikon için yukarıdaki
+> **resmi** yolları kullan. `hv.dom.onElement` ile React'in yönettiği bir
+> düğüme **çocuk EKLEME/KALDIRMA** — reconciliation `removeChild`
+> hatasıyla uygulamayı çökertir. `onElement`'i yalnızca mevcut bir
+> elemanın stil/attribute'unu değiştirmek için kullan. Seçiciler
+> (`.nav-item`, `.panel`…) sürümler arası değişebilir.
+
+### Kurtarma (bir eklenti uygulamayı dondurursa)
+
+Eklentiler uygulama içinde tam yetkiyle çalıştığı için kötü/eski bir
+eklenti UI'ı dondurabilir. İki kurtarma yolu (kurulu eklentiler
+`%APPDATA%\app.heravex\studio-data\plugins\` altındadır):
+
+1. **Tek eklentiyi kaldır:** ilgili `<id>` klasörünü sil, uygulamayı
+   yeniden başlat.
+2. **Güvenli mod (hepsini kapat):** `plugins\` içine boş bir `.disabled`
+   dosyası koy → hiçbir eklenti yüklenmez. Silince tekrar açılır.
 
 ### Geliştirme döngüsü
 
@@ -151,8 +182,10 @@ yapabilirsin (modül yeniden yüklenir).
 | Klasör | Ne yapar |
 |--------|----------|
 | `example-plugin/` | Dört katkı türünün dördünü gösteren minimal örnek |
-| `god-mode/` | **Güç katmanı vitrini** — neon tema (dom), `[progress:70]` çubuğu (editor), kayıt damgası + toast (hooks), Ctrl+Shift+G / sağ-tık (input) |
+| `god-mode/` | **Güç katmanı vitrini** — neon tema (dom), slash komutu (editor), kayıt damgası + toast (hooks), Ctrl+Shift+G / sağ-tık (input) |
+| `theme-pack/` | **Stabil kanca kanıtı** — `hv.themes.register` ile Ayarlar'a Dracula/Nord + `mountToSlot` ile sidebar rozeti (Dracula'nın çökmeyen hâli) |
 | `deadline-heatmap/` | Görev deadline'larını haftalık ısı haritasında görselleştirir |
 | `color-kit/` | Oyun bazlı renk paletleri, harmony analizi, multi-format export |
+| `theme-pack/` | 8 arkaplan teması (Aurora, Sakura, Neon City, vb.) — `hv.themes.register` API |
 
 Zip'leyip kurarak sistemi test edebilirsin.

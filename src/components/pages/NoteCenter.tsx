@@ -6,6 +6,7 @@ import {
 import { useAppStore } from "../../store";
 import { getAllNotes, saveNote, readNote } from "../../lib/storage";
 import { merge3 } from "../../lib/mergeNotes";
+import { consumeCreate } from "../../lib/createIntents";
 import { MarkdownWorkspace, type SaveStatus, type MarkdownTemplate } from "../shared/MarkdownWorkspace";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { useListKeyNav } from "../../lib/useListKeyNav";
@@ -60,6 +61,16 @@ export function NoteCenter() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Live mirrors for async callbacks (team-sync handler, save merge) that
+  // must see the CURRENT editor state, not the render they closed over.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const draftTitleRef = useRef(draftTitle);
+  draftTitleRef.current = draftTitle;
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const saveStatusRef = useRef(saveStatus);
+  saveStatusRef.current = saveStatus;
   // Per-note "base" content = what we loaded or last saved from disk.
   // The 3-way merge compares base (ancestor) · draft (ours) · disk (theirs)
   // so a teammate's concurrent edit is merged in, not clobbered.
@@ -251,16 +262,67 @@ export function NoteCenter() {
         }
       })();
     };
+    // Team sync with exact file ids: re-read only those notes. Our own
+    // autosave echoing back from disk is identical to what we hold, so it
+    // changes nothing and re-renders nothing (the old full reload replaced
+    // every note object on every autosave while the user typed).
+    const onDiskChange = (e: Event) => {
+      const detail = (e as CustomEvent<{ noteIds?: string[]; removedNoteIds?: string[] }>).detail;
+      if (!detail || (detail.removedNoteIds?.length ?? 0) > 0) { handler(); return; }
+      const ids = detail.noteIds ?? [];
+      if (ids.length === 0) return;
+      void (async () => {
+        const fetched: NoteRecord[] = [];
+        for (const id of ids) {
+          try {
+            const n = await readNote(id);
+            if (!n) { handler(); return; } // file vanished / unparsable → full reload
+            fetched.push(n);
+          } catch { handler(); return; }
+        }
+        setNotes((prev) => {
+          let changed = false;
+          const next = prev.map((n) => {
+            const f = fetched.find((x) => x.id === n.id);
+            if (f && (f.updatedAt !== n.updatedAt || f.content !== n.content || f.title !== n.title)) {
+              changed = true;
+              return f;
+            }
+            return n;
+          });
+          for (const f of fetched) {
+            if (!prev.some((n) => n.id === f.id)) { next.push(f); changed = true; }
+          }
+          return changed ? next.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : prev;
+        });
+        // Show a teammate's edit in the OPEN note — but only when it
+        // can't clobber anything: no pending autosave, no save in flight,
+        // editor content equals what we last loaded/saved, and the caret
+        // isn't in an editable field. Otherwise the 3-way merge on the
+        // next save folds their change in.
+        const sel = selectionRef.current;
+        if (sel?.kind !== "global") return;
+        const remote = fetched.find((x) => x.id === sel.noteId);
+        const base = baseByIdRef.current.get(sel.noteId);
+        if (!remote || base == null || remote.content === base) return;
+        const active = document.activeElement as HTMLElement | null;
+        const typing = !!active && (active.isContentEditable || active.tagName === "TEXTAREA" || active.tagName === "INPUT");
+        if (debounceRef.current || saveStatusRef.current === "saving" || draftRef.current !== base || typing) return;
+        baseByIdRef.current.set(remote.id, remote.content);
+        setDraft(remote.content);
+        if (remote.title !== draftTitleRef.current) setDraftTitle(remote.title);
+      })();
+    };
     // v0.9.7 — team-mode granular sync. The store fires the local-only
     // `notes-updated` event after a moodboard cascade; the team-sync
     // module fires `notes-file-changed` when notes.json's mtime moves
     // on disk (i.e. a teammate saved a note). Both call the same
     // silent refetch — no toast, no modal, no full refreshGames.
     window.addEventListener("heravex:notes-updated", handler);
-    window.addEventListener("heravex:notes-file-changed", handler);
+    window.addEventListener("heravex:notes-file-changed", onDiskChange);
     return () => {
       window.removeEventListener("heravex:notes-updated", handler);
-      window.removeEventListener("heravex:notes-file-changed", handler);
+      window.removeEventListener("heravex:notes-file-changed", onDiskChange);
     };
   }, []);
 
@@ -335,7 +397,9 @@ export function NoteCenter() {
             if (disk && disk.content !== base && disk.content !== note.content) {
               const { merged, conflicts } = merge3(base, note.content, disk.content);
               toSave = { ...note, content: merged };
-              if (draft === note.content) setDraft(merged); // reflect in the editor
+              // Compare with the LIVE draft: keystrokes typed during this
+              // read+merge round trip must not be overwritten.
+              if (draftRef.current === note.content) setDraft(merged); // reflect in the editor
               showToast(
                 conflicts === 0
                   ? tr("Merged your teammate's changes.", "Ekip arkadaşının değişiklikleri birleştirildi.")
@@ -383,10 +447,10 @@ export function NoteCenter() {
         content: nextContent,
         title: (nextTitle ?? draftTitle) || activeNote.title,
       };
-      debounceRef.current = setTimeout(() => void persistGlobal(merged), 800);
+      debounceRef.current = setTimeout(() => { debounceRef.current = null; void persistGlobal(merged); }, 800);
     } else if (activeGame) {
       const merged: GameRecord = { ...activeGame, notes: nextContent };
-      debounceRef.current = setTimeout(() => void persistProject(merged), 800);
+      debounceRef.current = setTimeout(() => { debounceRef.current = null; void persistProject(merged); }, 800);
     }
   };
 
@@ -403,6 +467,21 @@ export function NoteCenter() {
     setSaveStatus("idle");
     scheduleSave(draft, value);
   };
+
+  // ── Create requests from outside (tray, shortcuts, "+", Dashboard) ──
+  // Only after the initial load: creating earlier would be overwritten
+  // by the initial `setNotes(list)` and the selection reset.
+  const createNoteRef = useRef<(title?: string) => Promise<void>>(async () => {});
+  useEffect(() => {
+    if (!loaded) return;
+    const take = () => {
+      const intent = consumeCreate("note");
+      if (intent) void createNoteRef.current(intent.title || undefined);
+    };
+    take();
+    window.addEventListener("heravex:new-note", take);
+    return () => window.removeEventListener("heravex:new-note", take);
+  }, [loaded]);
 
   // ── Inline rename in browser ────────────────────────────────────────
   const startRename = (n: NoteRecord) => {
@@ -437,6 +516,8 @@ export function NoteCenter() {
       showError(err);
     }
   };
+
+  createNoteRef.current = (title?: string) => createNote(title);
 
   const handleDelete = async () => {
     if (!confirmDeleteId) return;

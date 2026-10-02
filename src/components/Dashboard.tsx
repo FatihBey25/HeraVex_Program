@@ -30,10 +30,12 @@ import { useAppStore, selectAllTasks } from "../store";
 import { calculateAccumulatedAmount } from "./PieChartWidget";
 import { statusLabel, statusToneClass, priorityLabel, type AppLanguage } from "../lib/i18n";
 import { imgSrc } from "../lib/images";
+import { requestCreate } from "../lib/createIntents";
 import { isGeneralGame } from "../lib/general-game";
 import type { DashboardPanelId, DashboardPanelEntry, DashboardHeroCard } from "../lib/appearance";
 import { usePomodoro, togglePomodoro, formatPomodoroTime } from "../lib/pomodoro";
 import { loadPomodoroPrefs } from "../lib/preferences";
+import { CustomWidgetPanel } from "./CustomWidgets";
 
 const BAR_PALETTE = ["#4f8cff", "#a78bfa", "#34d399", "#f59e0b", "#f87171", "#60a5fa", "#fb7185"];
 
@@ -94,7 +96,7 @@ function relativeTime(iso: string, language: string): string {
 export function Dashboard(_props: { onCreateGame: () => void }) {
   const {
     games: allGames, globalExpenses, exchangeRates, language,
-    setWorkspaceTab, setActiveTaskId, setSelectedId, ui, layout, profile,
+    setWorkspaceTab, setActiveTaskId, setSelectedId, ui, layout, profile, experimental,
   } = useAppStore();
 
   // Strip the synthetic "General" marker from every visible list but
@@ -359,9 +361,8 @@ export function Dashboard(_props: { onCreateGame: () => void }) {
     // Pre-stamp the title on a custom event the destination page picks
     // up to prefill its creator. Matches how App.tsx already wires
     // `heravex:new-task` / `heravex:new-note`.
-    const eventName = captureKind === "task" ? "heravex:new-task" : "heravex:new-note";
     setWorkspaceTab(captureKind === "task" ? "tasks" : "notes");
-    window.dispatchEvent(new CustomEvent(eventName, { detail: { title: text } }));
+    requestCreate(captureKind, { title: text });
     setCaptureText("");
   }, [captureText, captureKind, setWorkspaceTab]);
 
@@ -395,6 +396,10 @@ export function Dashboard(_props: { onCreateGame: () => void }) {
 
   return (
     <div key="dashboard" className="dashboard-wrapper page-fade">
+
+      {/* Version-safe plugin slot at the top of the dashboard. Use
+          hv.dom.mountToSlot("dashboard-top", el). */}
+      <div data-hv-slot="dashboard-top" className="hv-slot hv-slot-block" />
 
       {/* Hero — always on. v0.9.7 compact rewrite: greeting, headline,
           a "next up" task card that points at the single most important
@@ -468,6 +473,9 @@ export function Dashboard(_props: { onCreateGame: () => void }) {
 
       {/* Customizable panel grid — order + visibility driven by store. */}
       <div className="dashboard-grid">
+        {/* Beta: the user's own widgets (Settings → Experimental). */}
+        {experimental.betaEnabled && experimental.betaCustomWidgets &&
+          experimental.customWidgets.map((w) => <CustomWidgetPanel key={w.id} widget={w} language={language} />)}
         {panelOrder.filter((p) => p.enabled).map((p) => (
           <PanelHost
             key={p.id}

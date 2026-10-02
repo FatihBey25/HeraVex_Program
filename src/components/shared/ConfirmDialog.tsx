@@ -5,7 +5,8 @@ export type ConfirmVariant = "danger" | "warning" | "info";
 
 interface Props {
   title: string;
-  body?: string;
+  /** Text, or richer content (e.g. a preview list). */
+  body?: React.ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   /** Variant drives the icon, accent color and confirm button styling. */
@@ -78,7 +79,9 @@ export function ConfirmDialog({
           <div className="confirm-dialog-text">
             <h3 id="confirm-dialog-title" className="confirm-dialog-title">{title}</h3>
             {body && (
-              <p id="confirm-dialog-body" className="confirm-dialog-body">{body}</p>
+              typeof body === "string"
+                ? <p id="confirm-dialog-body" className="confirm-dialog-body">{body}</p>
+                : <div id="confirm-dialog-body" className="confirm-dialog-body">{body}</div>
             )}
           </div>
         </div>

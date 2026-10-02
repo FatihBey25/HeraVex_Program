@@ -175,7 +175,8 @@ export interface LayoutSlice {
   density: DensityMode;
   sidebarWidth: number;       // 200..320 px (200/240/280 are the spec presets)
   sidebarShowGroupHeaders: boolean;
-  /** Reserved for future Linear-style collapse-on-mouseleave behaviour. */
+  /** Sidebar stays an icon rail and opens over the page on hover
+   *  (`sidebar-collapse-hover` root class). */
   sidebarCollapseOnHover: boolean;
   taskRowDensity: DensityMode;
   noteRowDensity: DensityMode;
@@ -401,6 +402,7 @@ export function applyAppearanceToDom(
   root.classList.toggle("modal-animations-off", !layout.modalAnimations);
   root.classList.toggle("list-animations-off", !layout.listItemAnimations);
   root.classList.toggle("sidebar-group-headers-off", !layout.sidebarShowGroupHeaders);
+  root.classList.toggle("sidebar-collapse-hover", layout.sidebarCollapseOnHover === true);
   root.classList.toggle("transparent-panels", layout.transparentPanels);
   // Hard-enforce the chosen animation speed on every transitioning
   // element. The `anim-speed-managed` class triggers a global

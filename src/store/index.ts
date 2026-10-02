@@ -25,6 +25,7 @@ import {
   DEFAULT_BACKUP_PREFS, DEFAULT_STUDIO_IDENTITY,
   loadBackupPrefs, loadStudioIdentity,
   saveBackupPrefs, saveStudioIdentity,
+  backupHousekeeping,
   type BackupPrefsSlice, type StudioIdentitySlice,
 } from "../lib/studioIdentity";
 import {
@@ -41,6 +42,34 @@ import { notify } from "../lib/notify";
 import { translateError } from "../lib/errorTranslate";
 import { timerPause, timerStart } from "../lib/taskTimer";
 import { ensureBoardColumns } from "../lib/boardColumns";
+import { loadWorkspaces, resolveActiveWorkspace } from "../lib/workspaces";
+import { emitWebhookEvent } from "../lib/webhookEvents";
+
+/** Currency list from before the wallet became per-workspace (it was one
+ *  list in localStorage for every workspace). Only read, never written:
+ *  it seeds the workspace that adopts the old wallet. */
+const LEGACY_CURRENCIES_KEY = "studiohub_active_currencies";
+function legacyActiveCurrencies(): string[] | null {
+  try {
+    const saved = localStorage.getItem(LEGACY_CURRENCIES_KEY);
+    const list = saved ? (JSON.parse(saved) as unknown) : null;
+    return Array.isArray(list) && list.every((c) => typeof c === "string") && list.length > 0
+      ? (list as string[])
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** USD plus whatever the wallet's own expenses are in. */
+function currenciesFromExpenses(expenses: ExpenseItem[]): string[] {
+  const out = ["USD"];
+  for (const e of expenses) {
+    const c = e.currency ?? "USD";
+    if (!out.includes(c)) out.push(c);
+  }
+  return out;
+}
 
 export type WorkspaceTab =
   | "dashboard"
@@ -264,6 +293,9 @@ interface AppStore {
   releaseTemplate: ReleaseTemplateItem[];
   exchangeRates: Record<string, number>;
   activeCurrencies: string[];
+  /** Expenses from the pre-workspace wallet this workspace can still
+   *  copy in (shown as an offer on the Wallet page). */
+  walletLegacyAvailable: number;
   steamApiKey: string;
   itchApiKey: string;
   steamUserId: string;
@@ -300,6 +332,12 @@ interface AppStore {
   // ── game actions ───────────────────────────────────────────────────────────
   init: () => Promise<void>;
   refreshGames: (preferredId?: string, opts?: { silent?: boolean }) => Promise<void>;
+  /** Team sync: re-read only the given game files and replace just the
+   *  games that really changed. Our own saves echoing back from disk
+   *  (same `updatedAt`) are skipped, so typing doesn't re-render the app
+   *  every autosave. Falls back to a silent full refresh when a file is
+   *  missing (added / deleted / mid-replace). */
+  syncGamesFromDisk: (gameIds: string[]) => Promise<void>;
   applySavedGame: (game: GameRecord) => void;
   handleCreateGame: (opts: {
     title: string;
@@ -374,10 +412,18 @@ interface AppStore {
   /** Patch a single global (studio-wide) expense — used for toggling
    *  `sharedWithGameIds` from the wallet's general expense list. */
   updateGlobalExpense: (expenseId: string, patch: Partial<ExpenseItem>) => Promise<void>;
+  /** Re-read every preference slice from localStorage (another window
+   *  changed one). */
+  reloadPreferences: () => void;
+  /** (Re)load the active workspace's wallet. `silent` skips the error
+   *  toast (used for background reloads after a teammate's change). */
+  loadWallet: (opts?: { silent?: boolean }) => Promise<void>;
+  importLegacyWallet: () => Promise<void>;
 
   // ── settings / backup ─────────────────────────────────────────────────────
   handleSaveExchangeRates: (rates: Record<string, number>) => Promise<void>;
-  handleExportBackup: () => Promise<void>;
+  /** `auto`: scheduled backup (named auto-*, subject to retention). */
+  handleExportBackup: (opts?: { auto?: boolean }) => Promise<void>;
   handleImportBackup: (path?: string) => Promise<void>;
 
   // ── v0.9 M2: appearance / typography / layout (live preview) ──────────────
@@ -488,14 +534,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   steamUserId: "",
   avatarPath: "",
   googlePlayJsonPath: "",
-  activeCurrencies: (() => {
-    try {
-      const saved = localStorage.getItem("studiohub_active_currencies");
-      return saved ? (JSON.parse(saved) as string[]) : ["USD"];
-    } catch {
-      return ["USD"];
-    }
-  })(),
+  activeCurrencies: ["USD"],
+  walletLegacyAvailable: 0,
 
   // v0.9 M2 — appearance/typography/layout slices for live preview.
   // Loaded from localStorage on boot; the App-level effect mirrors
@@ -548,9 +588,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setActiveCurrencies: (currencies) => {
     set({ activeCurrencies: currencies });
-    try {
-      localStorage.setItem("studiohub_active_currencies", JSON.stringify(currencies));
-    } catch {}
+    // Per workspace (wallet.json). The old global localStorage list is
+    // left as it was — it only seeds the workspace that adopts the old
+    // wallet.
+    void storage.walletSetCurrencies(currencies).catch((err) => {
+      get().showToast(translateError(err, get().language), "error");
+    });
   },
 
   // ── appearance / typography / layout ──────────────────────────────────────
@@ -727,8 +770,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
         set({ showLanguagePrompt: true });
       }
 
+      // The wallet belongs to the workspace now (wallet.json); it loads
+      // alongside the games below.
+      void get().loadWallet();
       set({
-        globalExpenses: settings?.globalExpenses ?? [],
         // Disk-rehab: a v0.8.4 bug stored Frankfurter's raw "1 USD = X CUR"
         // value as our "USD per CUR" rate, inflating non-USD totals by
         // ~30× for currencies like TRY. Detect & invert any non-USD
@@ -745,7 +790,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
         googlePlayJsonPath: settings?.googlePlayJsonPath ?? "",
       });
 
-      await get().refreshGames();
+      // Startup watchdog. A cloud-drive client that can't deliver a file
+      // used to keep the app on the "Preparing HeraVex" screen forever.
+      // Rust now times out stalled reads, but never let the shell depend
+      // on that alone: after 25s open the app anyway and let the load
+      // land whenever it finishes.
+      let gamesSettled = false;
+      const gamesLoad = get().refreshGames().finally(() => { gamesSettled = true; });
+      await Promise.race([gamesLoad, new Promise((r) => setTimeout(r, 25_000))]);
+      if (!gamesSettled) {
+        set({ isLoading: false });
+        get().showToast(
+          get().language === "tr"
+            ? "Çalışma klasörü yanıt vermiyor (Google Drive / OneDrive?). Veriler yüklendikçe görünecek."
+            : "The workspace folder isn't responding (Google Drive / OneDrive?). Data will appear once it loads.",
+          "warning",
+        );
+      }
 
       // ── Overdue summary notification (max once per calendar day) ────────────
       try {
@@ -820,7 +881,53 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  syncGamesFromDisk: async (gameIds) => {
+    const ids = Array.from(new Set(gameIds.filter(Boolean)));
+    if (ids.length === 0) return;
+    let fresh: GameRecord[];
+    try {
+      fresh = await storage.loadGamesByIds(ids);
+    } catch {
+      await get().refreshGames(undefined, { silent: true });
+      return;
+    }
+    const known = new Set(get().games.map((g) => g.id));
+    const freshIds = new Set(fresh.map((g) => g.id));
+    // A file id may differ from the record id only for hand-edited data;
+    // any mismatch or missing file → let the full loader sort it out.
+    if (ids.some((id) => !freshIds.has(id)) || fresh.some((g) => !known.has(g.id))) {
+      await get().refreshGames(undefined, { silent: true });
+      return;
+    }
+    const lang = get().language;
+    set((st) => {
+      let changed = false;
+      const next = st.games.slice();
+      for (const raw of fresh) {
+        const idx = next.findIndex((g) => g.id === raw.id);
+        if (idx === -1) continue;
+        if (next[idx].updatedAt === raw.updatedAt) continue; // our own save echoing back
+        next[idx] = ensureBoardColumns({ ...raw, expenses: raw.expenses ?? [] }, lang);
+        changed = true;
+      }
+      return changed ? { games: next } : {};
+    });
+  },
+
   applySavedGame: (savedGame) => {
+    // Webhooks: tasks that went from open to done in THIS save. Only local
+    // saves come through here (team sync sets games directly), so a
+    // teammate's completion isn't announced again from every machine.
+    const before = get().games.find((g) => g.id === savedGame.id);
+    if (before) {
+      const wasDone = new Map(before.tasks.map((t) => [t.id, t.done]));
+      const user = get().profile.displayName;
+      for (const t of savedGame.tasks) {
+        if (t.done && wasDone.get(t.id) === false) {
+          void emitWebhookEvent("taskCompleted", { game: savedGame.title, task: t.title, user });
+        }
+      }
+    }
     set((s) => {
       const idx = s.games.findIndex((g) => g.id === savedGame.id);
       if (idx === -1) return { games: [savedGame, ...s.games] };
@@ -962,10 +1069,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   handleAddVersion: async (gameId, version, notes) => {
     const { showToast, applySavedGame, ui } = get();
     try {
-      const updated = await storage.addVersionWithBuild(gameId, version, notes);
+      const { backupPrefs } = get();
+      const keep = backupPrefs.autoPruneBuilds ? Math.max(1, backupPrefs.buildsToKeep || 5) : null;
+      const updated = await storage.addVersionWithBuild(gameId, version, notes, keep);
       applySavedGame(updated);
       showToast(ui.versionAdded);
       void notify("HeraVex", `${ui.versionAdded}: v${version}`);
+      void emitWebhookEvent("versionPublished", { game: updated.title, version, user: get().profile.displayName });
       return updated;
     } catch (err) {
       const msg = String(err);
@@ -1252,17 +1362,78 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   // ── expenses ───────────────────────────────────────────────────────────────
 
+  // General expenses are written one at a time against wallet.json (Rust
+  // does read-modify-write), never by saving the in-memory list: if the
+  // wallet failed to load, that list is empty and would wipe the file.
   updateGlobalExpense: async (expenseId, patch) => {
-    const { globalExpenses } = get();
-    const next = globalExpenses.map((e) =>
-      e.id === expenseId ? { ...e, ...patch } : e,
-    );
-    await storage.saveGlobalExpenses(next);
-    set({ globalExpenses: next });
+    const current = get().globalExpenses.find((e) => e.id === expenseId);
+    if (!current) return;
+    try {
+      const next = await storage.walletUpsertExpense({ ...current, ...patch });
+      set({ globalExpenses: next });
+    } catch (err) {
+      get().showToast(translateError(err, get().language), "error");
+    }
+  },
+
+  reloadPreferences: () => set({
+    appearance: loadAppearance(),
+    typography: loadTypography(),
+    layout: loadLayout(),
+    profile: loadProfile(),
+    general: loadGeneral(),
+    notifications: loadNotifications(),
+    startup: loadStartup(),
+    pomodoroPrefs: loadPomodoroPrefs(),
+    studioIdentity: loadStudioIdentity(),
+    backupPrefs: loadBackupPrefs(),
+    teamMode: loadTeamMode(),
+    webhooks: loadWebhooks(),
+    privacy: loadPrivacy(),
+    experimental: loadExperimental(),
+  }),
+
+  loadWallet: async (opts) => {
+    // A team folder never adopts the old wallet (Rust double-checks by
+    // looking for the members file).
+    let claimLegacy = true;
+    try {
+      const path = await storage.getWorkspacePath().catch(() => storage.getCachedWorkspacePath());
+      const active = resolveActiveWorkspace(loadWorkspaces(), path && path.trim() ? path : null);
+      claimLegacy = active.mode !== "team";
+    } catch { /* keep default */ }
+    try {
+      const w = await storage.loadWallet(claimLegacy);
+      let currencies = w.activeCurrencies && w.activeCurrencies.length > 0 ? w.activeCurrencies : null;
+      if (!currencies && w.migrated) {
+        // The workspace that adopted the old wallet also keeps the old
+        // currency list.
+        currencies = legacyActiveCurrencies();
+        if (currencies) void storage.walletSetCurrencies(currencies).catch(() => null);
+      }
+      set({
+        globalExpenses: w.globalExpenses,
+        activeCurrencies: currencies ?? currenciesFromExpenses(w.globalExpenses),
+        walletLegacyAvailable: w.legacyAvailable,
+      });
+    } catch (err) {
+      if (!opts?.silent) get().showToast(translateError(err, get().language), "error");
+    }
+  },
+
+  importLegacyWallet: async () => {
+    const { showToast, language } = get();
+    try {
+      const next = await storage.importLegacyWallet();
+      set({ globalExpenses: next, walletLegacyAvailable: 0 });
+      showToast(language === "tr" ? "Eski genel giderler bu çalışma alanına aktarıldı." : "Old general expenses copied into this workspace.");
+    } catch (err) {
+      showToast(translateError(err, language), "error");
+    }
   },
 
   handleAddExpense: async (expense, gameId) => {
-    const { games, applySavedGame, globalExpenses, showToast, ui } = get();
+    const { games, applySavedGame, showToast, ui } = get();
     try {
       if (gameId) {
         const game = games.find((g) => g.id === gameId);
@@ -1270,8 +1441,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const saved = await storage.saveGame({ ...game, expenses: [expense, ...game.expenses] });
         applySavedGame(saved);
       } else {
-        const next = [expense, ...globalExpenses];
-        await storage.saveGlobalExpenses(next);
+        const next = await storage.walletUpsertExpense(expense);
         set({ globalExpenses: next });
       }
       showToast(ui.expenseAdded);
@@ -1281,7 +1451,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   handleDeleteExpense: async (expenseId, gameId) => {
-    const { games, applySavedGame, globalExpenses, showToast, ui } = get();
+    const { games, applySavedGame, showToast, ui } = get();
     try {
       if (gameId) {
         const game = games.find((g) => g.id === gameId);
@@ -1293,8 +1463,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         applySavedGame(saved);
         showToast(ui.wExpenseDeleted, "success");
       } else {
-        const next = globalExpenses.filter((e) => e.id !== expenseId);
-        await storage.saveGlobalExpenses(next);
+        const next = await storage.walletDeleteExpense(expenseId);
         set({ globalExpenses: next });
         showToast(ui.wGeneralExpenseDeleted, "success");
       }
@@ -1310,8 +1479,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     await storage.saveExchangeRates(rates).catch(() => null);
   },
 
-  handleExportBackup: async () => {
-    const { showToast, ui, privacy, language } = get();
+  handleExportBackup: async (opts) => {
+    const { showToast, ui, privacy, language, backupPrefs } = get();
     const busyId = `backup-${Date.now()}`;
     const busyLabel = language === "tr" ? "Yedek alınıyor…" : "Saving backup…";
     window.dispatchEvent(new CustomEvent("heravex:busy", { detail: { id: busyId, label: busyLabel } }));
@@ -1320,7 +1489,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // The Rust side runs on a blocking thread so this await doesn't
       // freeze the UI even on multi-MB workspaces.
       const { invoke } = await import("../lib/invokeWrapper");
-      const path = await invoke<string>("export_backup_silent", { prefix: "manual" });
+      const path = await invoke<string>("export_backup_silent", {
+        prefix: opts?.auto ? "auto" : "manual",
+        housekeeping: backupHousekeeping(backupPrefs),
+      });
       // v0.9 M7 — redaction gate. When the user toggles "Redact API
       // keys on export" we read the freshly written JSON back, strip
       // the secret fields, and rewrite it before the toast fires.
@@ -1431,9 +1603,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
         set({ language: lang, ui: copy[lang] });
       }
       set({
-        globalExpenses: settings?.globalExpenses ?? [],
         releaseTemplate: settings?.releaseTemplate ?? defaultReleaseTemplate(),
       });
+      await get().loadWallet();
       showToast(ui.backupImported(resolved));
     } catch (err) {
       showToast(translateError(err, get().language), "error");

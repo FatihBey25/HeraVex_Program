@@ -34,15 +34,6 @@ const NEON_CSS = `
   h1, h2, h3, .hero-stat-value {
     text-shadow: 0 0 10px rgba(0, 255, 242, 0.35) !important;
   }
-  /* God Mode rozeti */
-  .god-badge {
-    display: inline-block; margin-left: 6px; font-size: 11px;
-    animation: godPulse 1.6s ease-in-out infinite;
-  }
-  @keyframes godPulse {
-    0%, 100% { filter: drop-shadow(0 0 2px #00fff2); opacity: .85; }
-    50%      { filter: drop-shadow(0 0 8px #ff00c8); opacity: 1; }
-  }
   /* İlerleme çubuğu (editör syntax'ı) */
   .god-progress {
     display: inline-flex; align-items: center; gap: 8px;
@@ -87,20 +78,17 @@ export default function activate(hv) {
   if (hv.storage.get("neon") !== false) neonOn();
 
   // ───────────────────────────────────────────────────────────────────
-  // 1b) onElement → Sidebar başlığına God Mode rozeti
+  // 1b) Güvenli slot → sidebar nav altına "God Mode aktif" rozeti.
   // ───────────────────────────────────────────────────────────────────
-  // Sidebar workspace/brand adının yanına ⚡ ekler. onElement mevcut VE
-  // gelecekteki eşleşmelere çalışır, o yüzden sidebar remount olsa bile
-  // rozet geri gelir.
-  // Sidebar brand başlığı: <div class="modern-brand-text"><h1>HeraVex</h1></div>
-  hv.dom.onElement(".modern-brand-text h1", (el) => {
-    if (el.querySelector(".god-badge")) return;
-    const badge = document.createElement("span");
-    badge.className = "god-badge";
-    badge.textContent = "⚡";
-    badge.title = "God Mode aktif";
-    el.appendChild(badge);
-  });
+  // ESKİ sürüm ⚡'yı onElement ile doğrudan marka başlığına eklerdi —
+  // bu React'in DOM'una dokunmaktır (yasak) ve markanın ciddiyetini
+  // bozar. Artık resmi güvenli slot kullanılıyor.
+  const badge = document.createElement("div");
+  badge.textContent = "⚡ God Mode";
+  badge.style.cssText =
+    "margin:8px 12px;padding:6px 10px;border-radius:9px;text-align:center;" +
+    "font-size:11px;font-weight:700;color:#00fff2;background:rgba(0,255,242,.12)";
+  hv.dom.mountToSlot("sidebar-nav-end", badge);
 
   // ───────────────────────────────────────────────────────────────────
   // 2) EDİTÖR — "/" menüsüne ilerleme çubuğu snippet'i ekler

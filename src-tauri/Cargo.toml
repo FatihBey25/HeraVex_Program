@@ -1,6 +1,6 @@
 [package]
-name = "studio_hub"
-version = "0.9.8"
+name = "HeraVex"
+version = "1.0.0"
 description = "HeraVex desktop shell"
 authors = ["mucah"]
 edition = "2021"
@@ -15,7 +15,7 @@ open = "5"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-notification = "2"
 tokio = { version = "1", features = ["time", "process", "io-util", "macros", "rt"] }
 uuid = { version = "1", features = ["v4"] }
@@ -26,6 +26,13 @@ pulldown-cmark = { version = "0.12", default-features = false }
 notify = "6"
 notify-debouncer-mini = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-single-instance = "2"
+
+# Settings → Privacy "Encrypt with OS keychain": Windows Credential
+# Manager / macOS Keychain. Linux needs the Secret Service (D-Bus) for a
+# persistent store, so the option is reported unsupported there.
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
